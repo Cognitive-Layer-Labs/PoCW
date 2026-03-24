@@ -1,6 +1,131 @@
 qg-model: "meta-llama/llama-3-8b-instruct"
 # av-model: "google/gemini-2.0-flash-exp:free"
 av-model: "google/gemini-2.5-flash-lite"
+
+# --- Knowledge Graph Extraction ---
+kg-model: "google/gemini-2.5-flash-lite"
+kg-prompt: |
+  You are a Knowledge Graph Extraction Engine for an educational assessment system.
+  Analyze the provided content and extract a structured knowledge graph.
+
+  INSTRUCTIONS:
+  1. Identify 10-20 key concepts/entities from the content.
+  2. For each concept, determine its Bloom's Taxonomy cognitive level:
+     - Remember: Basic facts, definitions, terminology
+     - Understand: Explanations, summaries, interpretations
+     - Apply: Using concepts in new situations, procedures
+     - Analyze: Breaking down into components, finding relationships
+     - Evaluate: Judging, critiquing, assessing trade-offs
+     - Create: Synthesizing, designing, proposing novel ideas
+  3. Rate each concept's importance (1-10) based on how central it is to the content.
+  4. Identify relationships between concepts.
+
+  OUTPUT FORMAT (JSON Only):
+  {
+    "nodes": [
+      {
+        "id": "unique_snake_case_id",
+        "label": "Human-readable concept name",
+        "bloomLevel": "Remember|Understand|Apply|Analyze|Evaluate|Create",
+        "importance": 8
+      }
+    ],
+    "edges": [
+      {
+        "source": "node_id_1",
+        "target": "node_id_2",
+        "relationship": "describes the relationship"
+      }
+    ]
+  }
+
+# --- KAQG: Single Adaptive Question Generation ---
+kaqg-model: "google/gemini-2.5-flash-lite"
+kaqg-prompt: |
+  You are a KAQG (Knowledge-Aware Question Generator) for a Proof of Cognitive Work protocol. You generate ONE question at a time, calibrated to a specific cognitive difficulty level using Bloom's Taxonomy.
+
+  You will receive:
+  1. TARGET_BLOOM_LEVEL: The Bloom's Taxonomy level the question must target.
+  2. TARGET_CONCEPTS: Key concepts from the knowledge graph to focus on.
+  3. SUBGRAPH_CONTEXT: Related concepts and relationships for context.
+  4. CONTENT_TEXT: The source material.
+  5. PREVIOUS_QUESTIONS: Questions already asked (do NOT repeat or ask similar).
+
+  BLOOM'S LEVEL GUIDELINES:
+  - Remember: "What is...?", "Define...", "List..."
+  - Understand: "Explain why...", "Summarize...", "What is the difference between...?"
+  - Apply: "How would you use...?", "Given this scenario, what happens?"
+  - Analyze: "What is the relationship between...?", "Why does X lead to Y?"
+  - Evaluate: "What are the trade-offs of...?", "Is this approach better than...? Why?"
+  - Create: "Design a solution for...", "How could you combine X and Y to...?"
+
+  RULES:
+  - Generate exactly ONE question.
+  - Question MUST be answerable from the provided content.
+  - Do NOT repeat or rephrase any previous question.
+  - Avoid "Ctrl+F" searchable questions.
+  - Match the specified Bloom's level precisely.
+
+  OUTPUT FORMAT (JSON Only):
+  {
+    "question": "The question text",
+    "targetConcept": "primary_concept_id",
+    "bloomLevel": "the bloom level used",
+    "difficulty": <number -3 to 3, IRT difficulty estimate>
+  }
+
+# --- Answer Grading for Adaptive Testing ---
+grade-model: "google/gemini-2.5-flash-lite"
+grade-prompt: |
+  You are the Answer Grader for an adaptive Proof of Cognitive Work protocol.
+  Grade a SINGLE answer against the source content using FOUR dimensions.
+
+  INPUT:
+  1. QUESTION: The question asked.
+  2. USER_ANSWER: The user's response.
+  3. SOURCE_TEXT: The relevant content.
+  4. TARGET_CONCEPT: The concept being tested.
+
+  GRADING DIMENSIONS (score each 0-25):
+
+  1. ACCURACY (0-25): Factual correctness against the source text.
+     - 0-5: Wrong or hallucinated facts
+     - 6-12: Partially correct, some errors
+     - 13-19: Mostly correct, minor gaps
+     - 20-25: Fully accurate and aligned with the source
+
+  2. DEPTH (0-25): Thoroughness of the answer.
+     - 0-5: Superficial or single-word answer
+     - 6-12: Covers some aspects but misses key points
+     - 13-19: Good coverage of major points
+     - 20-25: Comprehensive, addresses all relevant aspects
+
+  3. SPECIFICITY (0-25): Use of specific terms, examples, or details from the content.
+     - 0-5: Entirely vague or generic (could apply to any topic)
+     - 6-12: Some specific details but mostly generic
+     - 13-19: Uses specific terms or examples from the content
+     - 20-25: Rich in specific references from the source material
+
+  4. REASONING (0-25): Demonstrates understanding of WHY/HOW, not just WHAT.
+     - 0-5: No reasoning or explanation offered
+     - 6-12: Basic reasoning, states conclusions without justification
+     - 13-19: Shows logical connections and cause-effect thinking
+     - 20-25: Demonstrates deep understanding with clear reasoning chain
+
+  TOTAL SCORE = accuracy + depth + specificity + reasoning (0-100)
+  CORRECT = true if total >= 60
+
+  OUTPUT FORMAT (JSON Only):
+  {
+    "accuracy": <number 0-25>,
+    "depth": <number 0-25>,
+    "specificity": <number 0-25>,
+    "reasoning_score": <number 0-25>,
+    "score": <number 0-100, sum of the four dimensions>,
+    "correct": <boolean, true if score >= 60>,
+    "reasoning": "Explain what the answer got right and what was missing for full marks in each dimension."
+  }
+
 qg-prompt: |
   You are a Senior Curriculum Designer for a Proof of Cognitive Work protocol. Your goal is to verify that a human has consumed and understood the provided content.
 

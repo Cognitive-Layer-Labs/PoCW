@@ -121,8 +121,29 @@ function cleanText(text: string): string {
     .trim();
 }
 
-function truncate(text: string, limit = 5000): string {
+function truncate(text: string, limit = 500_000): string {
   return text.slice(0, limit);
+}
+
+/**
+ * Split text into overlapping chunks for large documents.
+ * Each chunk is ~chunkSize chars with `overlap` chars of overlap
+ * to preserve context at boundaries.
+ */
+export function chunkText(text: string, chunkSize = 4000, overlap = 500): string[] {
+  if (text.length <= chunkSize) return [text];
+
+  const chunks: string[] = [];
+  let start = 0;
+
+  while (start < text.length) {
+    const end = Math.min(start + chunkSize, text.length);
+    chunks.push(text.slice(start, end));
+    if (end >= text.length) break;
+    start += chunkSize - overlap;
+  }
+
+  return chunks;
 }
 
 /* ================= YouTube ================= */

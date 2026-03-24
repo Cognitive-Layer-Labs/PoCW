@@ -1,0 +1,123 @@
+{
+  "theta": 1.7392967440686171,
+  "se": 0.5636806728603407,
+  "score": 72,
+  "questionCount": 15,
+  "bloomLevelsReached": [
+    "Apply",
+    "Evaluate",
+    "Create",
+    "Analyze"
+  ],
+  "scoreBreakdown": [
+    {
+      "question": "Given that both JavaScript and ARM Assembly can be used to implement a Fibonacci sequence, how might the choice between these two languages affect the performance and readability of the resulting program?",
+      "score": 75,
+      "difficulty": 1,
+      "bloomLevel": "Apply",
+      "correct": true
+    },
+    {
+      "question": "Given the provided code snippets for JavaScript and ARM Assembly implementing a Fibonacci sequence, how would you modify the JavaScript code to handle potential errors, such as non-numeric input for the sequence length?",
+      "score": 75,
+      "difficulty": 1,
+      "bloomLevel": "Apply",
+      "correct": true
+    },
+    {
+      "question": "Considering the provided examples of JavaScript and ARM Assembly for generating a Fibonacci sequence, what are the trade-offs between using a high-level language like JavaScript versus a low-level language like ARM Assembly in terms of developer efficiency and machine execution speed?",
+      "score": 70,
+      "difficulty": 1.5,
+      "bloomLevel": "Evaluate",
+      "correct": true
+    },
+    {
+      "question": "Considering the concepts of programming languages, variables, and control flow statements like 'if..else', design a simple program outline that would allow a user to input a number and then determine if that number is even or odd.",
+      "score": 70,
+      "difficulty": 2,
+      "bloomLevel": "Create",
+      "correct": true
+    },
+    {
+      "question": "Design a simple program outline that takes two numbers as input and outputs their sum, using the concepts of variables and basic arithmetic operations.",
+      "score": 70,
+      "difficulty": 1.5,
+      "bloomLevel": "Create",
+      "correct": true
+    },
+    {
+      "question": "Imagine you are tasked with creating a new type of application that requires real-time user interaction and dynamic content updates on a webpage. Design a high-level outline for a program that leverages the strengths of a high-level language like JavaScript to achieve this, considering the need for variables to store user input and conditional logic (like if..else statements) to manage content display.",
+      "score": 0,
+      "difficulty": 2,
+      "bloomLevel": "Create",
+      "correct": false
+    },
+    {
+      "question": "Design a simple program outline that takes a user's name as input and then prints a personalized greeting, incorporating the concepts of variables to store the name and conditional logic (if..else) to potentially vary the greeting based on the time of day (assume a variable for time of day exists).",
+      "score": 0,
+      "difficulty": 2,
+      "bloomLevel": "Create",
+      "correct": false
+    },
+    {
+      "question": "Analyze the relationship between the readability of high-level languages like JavaScript and the direct hardware control offered by low-level languages like ARM Assembly, specifically in the context of implementing a Fibonacci sequence.",
+      "score": 75,
+      "difficulty": 1,
+      "bloomLevel": "Analyze",
+      "correct": true
+    },
+    {
+      "question": "Design a program outline that takes a user's age as input and then determines if they are eligible to vote, considering the voting age is 18. Your design should incorporate the use of variables to store the age and conditional logic (if..else) to manage the output message.",
+      "score": 70,
+      "difficulty": 2,
+      "bloomLevel": "Create",
+      "correct": true
+    },
+    {
+      "question": "Imagine you are developing a new application that requires users to input data, and you need to store this data for later use. Design a conceptual outline for how you would use variables in a programming language to manage this user-inputted data, considering that the data might need to be updated or modified.",
+      "score": 0,
+      "difficulty": 2,
+      "bloomLevel": "Create",
+      "correct": false
+    },
+    {
+      "question": "Imagine you are creating a new programming language. Design a core feature that would allow developers to manage and store temporary data, drawing inspiration from the concept of variables in existing languages.",
+      "score": 75,
+      "difficulty": 2.5,
+      "bloomLevel": "Create",
+      "correct": true
+    },
+    {
+      "question": "Imagine you are designing a new educational tool to teach programming concepts. Create a brief outline for a module that introduces the fundamental idea of 'variables' to absolute beginners, explaining their purpose and how they are used in simple programming scenarios, drawing parallels to everyday concepts.",
+      "score": 0,
+      "difficulty": 2,
+      "bloomLevel": "Create",
+      "correct": false
+    },
+    {
+      "question": "Design a conceptual framework for a simple game that uses variables to track player scores and conditional logic (if..else) to determine if the player has won or lost.",
+      "score": 70,
+      "difficulty": 2,
+      "bloomLevel": "Create",
+      "correct": true
+    },
+    {
+      "question": "Design a conceptual outline for a program that translates a natural language instruction (like 'print hello world') into a sequence of low-level binary commands that a computer can execute, considering the role of programming languages as intermediaries.",
+      "score": 0,
+      "difficulty": 2,
+      "bloomLevel": "Create",
+      "correct": false
+    },
+    {
+      "question": "Imagine you are designing a new programming language. Create a set of core principles that would guide the development of its syntax, focusing on balancing the readability of high-level languages with the efficiency of low-level languages.",
+      "score": 0,
+      "difficulty": 2,
+      "bloomLevel": "Create",
+      "correct": false
+    }
+  ],
+  "contentUrl": "https://microsoft.github.io/Web-Dev-For-Beginners/pdf/readme.pdf",
+  "contentId": 1773226361882,
+  "userAddress": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+  "timestamp": "2026-03-11T11:09:28.296Z"
+}

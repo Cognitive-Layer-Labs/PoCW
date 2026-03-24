@@ -1,0 +1,121 @@
+{
+  "theta": -1.3337680589579284,
+  "se": 0.5074713868896376,
+  "score": 33,
+  "questionCount": 15,
+  "bloomLevelsReached": [
+    "Apply",
+    "Remember"
+  ],
+  "scoreBreakdown": [
+    {
+      "question": "Given that quiet development is disrupted by looking outwards, how might a young poet seeking to cultivate their inner life apply the concept of embracing solitude to protect their creative process?",
+      "score": 65,
+      "difficulty": 1,
+      "bloomLevel": "Apply",
+      "correct": true
+    },
+    {
+      "question": "Considering that sadness can be a period of transformation where the future enters us, how might one apply the principle of self-examination during such a period to ensure that this 'future' becomes an integrated part of their being rather than an alien occurrence?",
+      "score": 65,
+      "difficulty": 1.5,
+      "bloomLevel": "Apply",
+      "correct": true
+    },
+    {
+      "question": "Analyze the relationship between the concept of 'power' as presented in the text and the traditional understanding of 'gender roles', considering how societal expectations might influence an individual's perception and exercise of power.",
+      "score": 0,
+      "difficulty": 1,
+      "bloomLevel": "Analyze",
+      "correct": false
+    },
+    {
+      "question": "Given Rilke's advice to convert anxiety into a tool for deepening solitude, how might a writer experiencing creative block apply this 'reversal trick' to their own writing process?",
+      "score": 40,
+      "difficulty": 1,
+      "bloomLevel": "Apply",
+      "correct": false
+    },
+    {
+      "question": "Given that self-examination involves a descent into solitude, how might a poet apply this process to their writing to ensure they are examining the depths of their 'source of life' rather than merely looking outwards?",
+      "score": 40,
+      "difficulty": 1.5,
+      "bloomLevel": "Apply",
+      "correct": false
+    },
+    {
+      "question": "Given that the text suggests that professions are often barren and disconnected from life, and that the solitary individual is subject to fundamental laws, how might one apply the concept of 'quiet development' by focusing on their inner world and solitude, rather than seeking external validation or connection?",
+      "score": 0,
+      "difficulty": 1,
+      "bloomLevel": "Apply",
+      "correct": false
+    },
+    {
+      "question": "Explain why the concept of 'Artistic Creation' is considered a 'Source of Life' within the context of the provided text.",
+      "score": 20,
+      "difficulty": 0,
+      "bloomLevel": "Understand",
+      "correct": false
+    },
+    {
+      "question": "Explain why the text suggests that accepting solitude can lead to a sense of insecurity and disorientation, and how this experience is ultimately presented as necessary for growth.",
+      "score": 0,
+      "difficulty": 0,
+      "bloomLevel": "Understand",
+      "correct": false
+    },
+    {
+      "question": "Explain why the text suggests that sadness, when experienced in solitude, is a crucial period for personal transformation and the integration of the future.",
+      "score": 0,
+      "difficulty": 0,
+      "bloomLevel": "Understand",
+      "correct": false
+    },
+    {
+      "question": "Explain the relationship between physical creation (like childbirth) and spiritual creation (like artistic endeavors) as described in the text.",
+      "score": 0,
+      "difficulty": 0,
+      "bloomLevel": "Understand",
+      "correct": false
+    },
+    {
+      "question": "Explain the significance of Rilke's association with the Insel Press as indicated by the publication of Das Stunden-Buch.",
+      "score": 0,
+      "difficulty": 0,
+      "bloomLevel": "Understand",
+      "correct": false
+    },
+    {
+      "question": "What is the primary criticism leveled against Christianity in the text regarding its influence on sexuality?",
+      "score": 65,
+      "difficulty": -1.5,
+      "bloomLevel": "Remember",
+      "correct": true
+    },
+    {
+      "question": "Explain why the text suggests that doubts, when properly examined and challenged, can transform from destructive forces into valuable assets in the construction of one's life.",
+      "score": 0,
+      "difficulty": 0.5,
+      "bloomLevel": "Understand",
+      "correct": false
+    },
+    {
+      "question": "What is the title of the collection of poems by Rainer Maria Rilke that is closely related to the Sonnets to Orpheus?",
+      "score": 0,
+      "difficulty": -1.5,
+      "bloomLevel": "Remember",
+      "correct": false
+    },
+    {
+      "question": "What is the title of the lyrical prose text written by Rainer Maria Rilke that might have appealed to Franz Xaver Kappus due to its military character?",
+      "score": 0,
+      "difficulty": -1.5,
+      "bloomLevel": "Remember",
+      "correct": false
+    }
+  ],
+  "contentUrl": "https://ia902903.us.archive.org/13/items/letterstoayoungpoetpdfdrive.com/Letters%20to%20a%20Young%20Poet%20%28%20PDFDrive.com%20%29.pdf",
+  "contentId": 1773231467358,
+  "userAddress": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+  "timestamp": "2026-03-11T12:52:57.850Z"
+}

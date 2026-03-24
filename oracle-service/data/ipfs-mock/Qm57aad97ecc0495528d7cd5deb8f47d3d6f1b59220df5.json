@@ -1,0 +1,121 @@
+{
+  "theta": 1.8555662413396803,
+  "se": 0.5374860507958306,
+  "score": 73,
+  "questionCount": 15,
+  "bloomLevelsReached": [
+    "Apply",
+    "Create"
+  ],
+  "scoreBreakdown": [
+    {
+      "question": "Given that both JavaScript and ARM Assembly can be used to implement a Fibonacci sequence, how might the choice between these two languages impact the performance and readability of the resulting computer program?",
+      "score": 70,
+      "difficulty": 1,
+      "bloomLevel": "Apply",
+      "correct": true
+    },
+    {
+      "question": "Imagine you are tasked with creating a simple calculator application. Design a high-level plan that outlines the core components and logic required, considering the need for user input, processing, and output, and how variables would be used to store intermediate results.",
+      "score": 70,
+      "difficulty": 2,
+      "bloomLevel": "Create",
+      "correct": true
+    },
+    {
+      "question": "Design a simplified programming language that uses only two commands: 'ADD' and 'PRINT'. Outline how you would implement a feature to store and recall a number using variables within this language, considering the constraints of only having these two commands.",
+      "score": 0,
+      "difficulty": 2.5,
+      "bloomLevel": "Create",
+      "correct": false
+    },
+    {
+      "question": "Design a basic structure for a program that takes user input for a number, calculates its Fibonacci sequence up to that number, and then displays the sequence. Consider how you would use variables to store the numbers in the sequence and how an 'if..else' statement might be used to control the program's flow.",
+      "score": 90,
+      "difficulty": 2,
+      "bloomLevel": "Create",
+      "correct": true
+    },
+    {
+      "question": "Design a simple program that simulates a basic text-based adventure game. Your design should include at least three distinct locations, a mechanism for the player to move between these locations, and a way to present descriptive text to the player about their surroundings and any items they might find.",
+      "score": 85,
+      "difficulty": 2,
+      "bloomLevel": "Create",
+      "correct": true
+    },
+    {
+      "question": "Design a system that could automatically generate different types of programming language code (e.g., Python, Java, C++) based on a high-level description of a program's functionality, considering the need for variable declaration, conditional logic (if-else), and basic arithmetic operations.",
+      "score": 85,
+      "difficulty": 2.5,
+      "bloomLevel": "Create",
+      "correct": true
+    },
+    {
+      "question": "Design a system that could automatically generate different types of programming language code (e.g., Python, Java, C++) based on a high-level description of a program's functionality, considering the need for variable declaration, conditional logic (if-else), and basic arithmetic operations.",
+      "score": 0,
+      "difficulty": 2,
+      "bloomLevel": "Create",
+      "correct": false
+    },
+    {
+      "question": "Design a system that can translate a high-level description of a program's functionality into executable code for a specific device, considering the need to handle both low-level and high-level programming language constructs and the device's binary limitations.",
+      "score": 0,
+      "difficulty": 2.5,
+      "bloomLevel": "Create",
+      "correct": false
+    },
+    {
+      "question": "Design a system that could automatically generate different types of programming language code (e.g., Python, Java, C++) based on a high-level description of a program's functionality, considering the need for variable declaration, conditional logic (if-else), and basic arithmetic operations.",
+      "score": 0,
+      "difficulty": 2.5,
+      "bloomLevel": "Create",
+      "correct": false
+    },
+    {
+      "question": "Imagine you are creating a new programming language. Design a simple syntax for declaring a variable, assigning it a value, and then using it in a basic arithmetic operation, considering how a device would interpret these instructions.",
+      "score": 70,
+      "difficulty": 2.5,
+      "bloomLevel": "Create",
+      "correct": true
+    },
+    {
+      "question": "Design a system that can translate a high-level description of a program's functionality into executable code for a specific device, considering the need to handle both low-level and high-level programming language constructs and the device's binary limitations.",
+      "score": 0,
+      "difficulty": 2.5,
+      "bloomLevel": "Create",
+      "correct": false
+    },
+    {
+      "question": "Design a system that can translate a high-level description of a program's functionality into executable code for a specific device, considering the need to handle both low-level and high-level programming language constructs and the device's binary limitations.",
+      "score": 0,
+      "difficulty": 2.5,
+      "bloomLevel": "Create",
+      "correct": false
+    },
+    {
+      "question": "Design a system that can translate a high-level description of a program's functionality into executable code for a specific device, considering the need to handle both low-level and high-level programming language constructs and the device's binary limitations.",
+      "score": 0,
+      "difficulty": 2.5,
+      "bloomLevel": "Create",
+      "correct": false
+    },
+    {
+      "question": "Design a system that can take a high-level description of a program's functionality and generate executable code for a specific device, considering the need to handle both low-level and high-level programming language constructs and the device's binary limitations.",
+      "score": 0,
+      "difficulty": 2.5,
+      "bloomLevel": "Create",
+      "correct": false
+    },
+    {
+      "question": "Design a system that can translate a high-level description of a program's functionality into executable code for a specific device, considering the need to handle both low-level and high-level programming language constructs and the device's binary limitations.",
+      "score": 50,
+      "difficulty": 2.5,
+      "bloomLevel": "Create",
+      "correct": false
+    }
+  ],
+  "contentUrl": "https://microsoft.github.io/Web-Dev-For-Beginners/pdf/readme.pdf",
+  "contentId": 1773224087303,
+  "userAddress": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+  "timestamp": "2026-03-11T10:39:47.426Z"
+}

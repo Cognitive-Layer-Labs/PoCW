@@ -3,11 +3,13 @@ import { ethers } from "hardhat";
 import readline from "readline";
 
 import {
-  generateChallenge,
-  recordAnswers,
-  verifyChallenge,
-  __clearChallengesForTest
-} from "../oracle-service/src/services/ai-engine";
+  createSession,
+  submitAnswer,
+  getSessionResult,
+  __clearSessionsForTest
+} from "../oracle-service/src/services/session-manager";
+import { initNeo4j, closeNeo4j } from "../oracle-service/src/services/kg-store";
+import { thetaToScore } from "../oracle-service/src/services/irt-engine";
 
 /* helper ca sa citim input din terminal */
 function ask(question: string): Promise<string> {
@@ -25,7 +27,8 @@ function ask(question: string): Promise<string> {
 }
 
 async function main() {
-  __clearChallengesForTest();
+  __clearSessionsForTest();
+  initNeo4j();
 
   /* conectare la hardhat node */
   const [deployer, oracle, user] = await hre.ethers.getSigners();
@@ -51,49 +54,76 @@ async function main() {
 
   console.log("\nContracts deployed");
 
-  /* === AI REAL === */
-  const contentUrl = "https://bitcoin.org/bitcoin.pdf";
+  /* === ADAPTIVE TESTING FLOW === */
+  // const contentUrl = "https://bitcoin.org/bitcoin.pdf";
+  const contentUrl = "https://microsoft.github.io/Web-Dev-For-Beginners/pdf/readme.pdf";
+  // const contentUrl = "https://ia902903.us.archive.org/13/items/letterstoayoungpoetpdfdrive.com/Letters%20to%20a%20Young%20Poet%20%28%20PDFDrive.com%20%29.pdf";
 
-  console.log("\n=== GENERATING QUESTIONS ===");
-  const challenge = await generateChallenge(contentUrl, user.address);
+  console.log("\n=== STARTING ADAPTIVE SESSION ===");
+  console.log("Building knowledge graph & generating first question...\n");
 
-  console.log("\nQUESTIONS:");
-  challenge.questions.forEach((q, i) => {
-    console.log(`Q${i + 1}: ${q}`);
-  });
+  const session = await createSession(contentUrl, user.address);
+  let questionNumber = 1;
+  let currentQuestion = session.question;
+  let converged = false;
 
-  console.log("\n=== WRITE YOUR ANSWERS ===");
+  while (!converged) {
+    console.log(`--- Question ${questionNumber} [${currentQuestion.bloomLevel}] (difficulty: ${currentQuestion.difficulty.toFixed(2)}) ---`);
+    console.log(`Q: ${currentQuestion.question}\n`);
 
-  const answers: string[] = [];
-  for (let i = 0; i < challenge.questions.length; i++) {
-    const answer = await ask(`Answer Q${i + 1}: `);
-    answers.push(answer);
+    const answer = await ask(`Your answer: `);
+
+    console.log("\nGrading...");
+    const result = await submitAnswer(session.sessionId, answer);
+
+    console.log(`  Score: ${result.gradeResult.score}/100 (${result.gradeResult.correct ? "CORRECT" : "INCORRECT"})`);
+    const d = result.gradeResult.dimensions;
+    console.log(`    Accuracy: ${d.accuracy}/25 | Depth: ${d.depth}/25 | Specificity: ${d.specificity}/25 | Reasoning: ${d.reasoning}/25`);
+    console.log(`  ${result.gradeResult.reasoning}`);
+    console.log(`  θ = ${result.progress.currentTheta.toFixed(3)}, SE = ${result.progress.currentSE.toFixed(3)}, Level: ${result.progress.bloomLevel}`);
+
+    if (result.status === "converged") {
+      converged = true;
+      console.log(`\n=== CONVERGED after ${result.progress.questionNumber} questions ===`);
+    } else {
+      currentQuestion = result.nextQuestion!;
+      questionNumber++;
+      console.log("");
+    }
   }
 
-  recordAnswers(challenge.challengeId, answers);
+  /* === GET RESULT === */
+  console.log("\n=== COGNITIVE PROFILE ===");
+  const finalResult = await getSessionResult(session.sessionId);
 
-  console.log("\n=== GRADING (AI REAL) ===");
-  const score = await verifyChallenge(challenge.challengeId);
-  console.log("Score received:", score);
+  console.log(`  Final θ:    ${finalResult.theta.toFixed(3)}`);
+  console.log(`  Score:      ${finalResult.score}/100`);
+  console.log(`  Questions:  ${finalResult.cognitiveProfile.questionCount}`);
+  console.log(`  Bloom's:    ${finalResult.cognitiveProfile.bloomLevelsReached.join(", ") || "none"}`);
+  console.log(`  IPFS hash:  ${finalResult.ipfsHash}`);
+
+  const score = finalResult.score;
 
   console.log("\n=== MINTING SBT ===");
 
   const hash = ethers.solidityPackedKeccak256(
     ["address", "uint256", "uint256"],
-    [user.address, challenge.contentId, score]
+    [user.address, session.contentId, score]
   );
 
   const signature = await oracle.signMessage(ethers.getBytes(hash));
 
   await controller.verifyAndMint(
     user.address,
-    challenge.contentId,
+    session.contentId,
     score,
     signature
   );
 
-  const balance = await sbt.balanceOf(user.address, challenge.contentId);
+  const balance = await sbt.balanceOf(user.address, session.contentId);
   console.log("SBT balance:", balance.toString());
+
+  await closeNeo4j();
 
   console.log("\n✅ FLOW COMPLETED");
 }
