@@ -2,7 +2,7 @@
  * KAQG Question Generator
  *
  * Generates single, difficulty-calibrated questions using:
- * - Knowledge Graph context from Neo4j
+ * - Knowledge Graph context from FalkorDB
  * - Bloom's Taxonomy level targeting (mapped from IRT difficulty)
  * - Previous questions to avoid repetition
  *
@@ -12,7 +12,7 @@
 import { readFileSync } from "fs";
 import * as path from "path";
 import * as yaml from "js-yaml";
-import { getOpenAIClient } from "./ai-engine";
+import { getOpenAIClient } from "./llm-client";
 import { getConceptsByDifficulty } from "./kg-store";
 import { difficultyToBloom, IRT_CORRECT_THRESHOLD } from "./irt-engine";
 import { KGNode, KGEdge } from "./kg-builder";
@@ -43,6 +43,14 @@ interface KAQGConfig {
   ["kaqg-prompt"]: string;
   ["grade-model"]: string;
   ["grade-prompt"]: string;
+}
+
+export class QuestionGenerationError extends Error {
+  constructor(message: string) { super(message); this.name = "QuestionGenerationError"; }
+}
+
+export class GradingError extends Error {
+  constructor(message: string) { super(message); this.name = "GradingError"; }
 }
 
 const configPath = path.resolve(__dirname, "..", "..", "ai-config.yml");
@@ -92,7 +100,7 @@ export async function generateSingleQuestion(
 ): Promise<GeneratedQuestion> {
   const targetBloom = difficultyToBloom(targetDifficulty);
 
-  // Retrieve relevant concepts and subgraph from Neo4j
+  // Retrieve relevant concepts and subgraph from FalkorDB
   const { concepts, subgraph } = await getConceptsByDifficulty(
     contentId,
     targetDifficulty
@@ -133,7 +141,14 @@ export async function generateSingleQuestion(
     });
 
     const payload = completion.choices[0].message.content || "";
-    const result = parseQuestionPayload(payload, targetDifficulty, targetBloom);
+
+    let result: GeneratedQuestion;
+    try {
+      result = parseQuestionPayload(payload, targetDifficulty, targetBloom);
+    } catch {
+      // Parse failed — retry with higher temperature
+      continue;
+    }
 
     // On last attempt or if sufficiently unique, accept the question
     if (attempt === MAX_DEDUP_RETRIES || !isTooSimilar(result.question, previousQuestions)) {
@@ -141,8 +156,7 @@ export async function generateSingleQuestion(
     }
   }
 
-  // Unreachable, but satisfies TypeScript
-  return { question: "Unable to generate unique question", targetConcept: "unknown", bloomLevel: targetBloom, difficulty: targetDifficulty };
+  throw new QuestionGenerationError("Failed to generate a unique question after all retries");
 }
 
 /**
@@ -154,28 +168,41 @@ export async function gradeAnswer(
   contentText: string,
   targetConcept: string
 ): Promise<GradeResult> {
-  const completion = await getOpenAIClient().chat.completions.create({
-    model: config["grade-model"],
-    temperature: 0,
-    response_format: { type: "json_object" },
-    messages: [
-      {
-        role: "system",
-        content: config["grade-prompt"]
-      },
-      {
-        role: "user",
-        content:
-          `QUESTION: ${question}\n\n` +
-          `USER_ANSWER: ${userAnswer}\n\n` +
-          `TARGET_CONCEPT: ${targetConcept}\n\n` +
-          `SOURCE_TEXT:\n${contentText}`
-      }
-    ]
-  });
+  const MAX_GRADE_RETRIES = 2;
 
-  const payload = completion.choices[0].message.content || "";
-  return parseGradePayload(payload);
+  for (let attempt = 0; attempt < MAX_GRADE_RETRIES; attempt++) {
+    const completion = await getOpenAIClient().chat.completions.create({
+      model: config["grade-model"],
+      temperature: 0,
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content: config["grade-prompt"]
+        },
+        {
+          role: "user",
+          content:
+            `QUESTION: ${question}\n\n` +
+            `USER_ANSWER: ${userAnswer}\n\n` +
+            `TARGET_CONCEPT: ${targetConcept}\n\n` +
+            `SOURCE_TEXT:\n${contentText}`
+        }
+      ]
+    });
+
+    const payload = completion.choices[0].message.content || "";
+    try {
+      return parseGradePayload(payload);
+    } catch {
+      if (attempt === MAX_GRADE_RETRIES - 1) {
+        throw new GradingError("Failed to parse grading response after retries");
+      }
+    }
+  }
+
+  // Unreachable, satisfies TypeScript
+  throw new GradingError("Grading failed");
 }
 
 function parseQuestionPayload(
@@ -192,12 +219,7 @@ function parseQuestionPayload(
       difficulty: typeof parsed.difficulty === "number" ? parsed.difficulty : fallbackDifficulty
     };
   } catch {
-    return {
-      question: "Unable to generate question",
-      targetConcept: "unknown",
-      bloomLevel: fallbackBloom,
-      difficulty: fallbackDifficulty
-    };
+    throw new QuestionGenerationError("Failed to parse question response from LLM");
   }
 }
 
@@ -231,12 +253,7 @@ function parseGradePayload(payload: string): GradeResult {
       dimensions
     };
   } catch {
-    return {
-      correct: false,
-      score: 0,
-      reasoning: "Failed to parse grading response",
-      dimensions: { accuracy: 0, depth: 0, specificity: 0, reasoning: 0 }
-    };
+    throw new GradingError("Failed to parse grading response from LLM");
   }
 }
 

@@ -8,7 +8,7 @@ import {
   getSessionResult,
   __clearSessionsForTest
 } from "../oracle-service/src/services/session-manager";
-import { initNeo4j, closeNeo4j } from "../oracle-service/src/services/kg-store";
+import { initFalkorDB, closeFalkorDB } from "../oracle-service/src/services/kg-store";
 import { thetaToScore } from "../oracle-service/src/services/irt-engine";
 
 /* helper ca sa citim input din terminal */
@@ -28,7 +28,7 @@ function ask(question: string): Promise<string> {
 
 async function main() {
   __clearSessionsForTest();
-  initNeo4j();
+  await initFalkorDB();
 
   /* conectare la hardhat node */
   const [deployer, oracle, user] = await hre.ethers.getSigners();
@@ -56,7 +56,8 @@ async function main() {
 
   /* === ADAPTIVE TESTING FLOW === */
   // const contentUrl = "https://bitcoin.org/bitcoin.pdf";
-  const contentUrl = "https://microsoft.github.io/Web-Dev-For-Beginners/pdf/readme.pdf";
+  // const contentUrl = "https://microsoft.github.io/Web-Dev-For-Beginners/pdf/readme.pdf";
+  const contentUrl = "https://amiciiisteti.wordpress.com/wp-content/uploads/2017/01/ursul-pacalit-de-vulpe.pdf";
   // const contentUrl = "https://ia902903.us.archive.org/13/items/letterstoayoungpoetpdfdrive.com/Letters%20to%20a%20Young%20Poet%20%28%20PDFDrive.com%20%29.pdf";
 
   console.log("\n=== STARTING ADAPTIVE SESSION ===");
@@ -123,7 +124,7 @@ async function main() {
   const balance = await sbt.balanceOf(user.address, session.contentId);
   console.log("SBT balance:", balance.toString());
 
-  await closeNeo4j();
+  await closeFalkorDB();
 
   console.log("\n✅ FLOW COMPLETED");
 }

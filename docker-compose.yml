@@ -1,14 +1,22 @@
 services:
-  neo4j:
-    image: neo4j:5-community
+  falkordb:
+    image: falkordb/falkordb:latest
     ports:
-      - "7474:7474"
-      - "7687:7687"
+      - "6379:6379"
+      - "8001:3000"
     environment:
-      NEO4J_AUTH: neo4j/pocw_dev_password
-      NEO4J_PLUGINS: '["graph-data-science"]'
+      - REDIS_ARGS=--maxmemory 1536mb --maxmemory-policy noeviction --appendonly yes --auto-aof-rewrite-min-size 64mb --auto-aof-rewrite-percentage 100 --save 300 10
+    deploy:
+      resources:
+        limits:
+          memory: 2g
     volumes:
-      - neo4j_data:/data
+      - falkor_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 volumes:
-  neo4j_data:
+  falkor_data:

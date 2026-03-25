@@ -1,17 +1,16 @@
 import { expect } from "chai";
 import sinon from "sinon";
 
-// Stub external dependencies before importing modules that use them
-import * as kgStore from "../src/services/kg-store";
-import * as aiEngine from "../src/services/ai-engine";
-import { generateSingleQuestion, gradeAnswer } from "../src/services/question-generator";
+import { __setGetConceptsByDifficultyForTest } from "../src/services/kg-store";
+import * as llmClient from "../src/services/llm-client";
+import { generateSingleQuestion, gradeAnswer, QuestionGenerationError, GradingError } from "../src/services/question-generator";
 
 describe("Question Generator", () => {
   let openAIStub: any;
 
   beforeEach(() => {
     // Stub KG store to return mock concepts
-    sinon.stub(kgStore, "getConceptsByDifficulty").resolves({
+    __setGetConceptsByDifficultyForTest(async () => ({
       concepts: [
         { id: "proof_of_work", label: "Proof of Work", bloomLevel: "Understand", importance: 8 },
         { id: "mining", label: "Mining", bloomLevel: "Understand", importance: 7 }
@@ -25,10 +24,11 @@ describe("Question Generator", () => {
           { source: "proof_of_work", target: "mining", relationship: "implemented_by" }
         ]
       }
-    });
+    }));
   });
 
   afterEach(() => {
+    __setGetConceptsByDifficultyForTest(null);
     sinon.restore();
   });
 
@@ -41,7 +41,7 @@ describe("Question Generator", () => {
         difficulty: -0.5
       };
 
-      aiEngine.__setOpenAIClientProviderForTest(() => ({
+      llmClient.__setOpenAIClientProviderForTest(() => ({
         chat: {
           completions: {
             create: sinon.stub().resolves({
@@ -59,8 +59,8 @@ describe("Question Generator", () => {
       expect(result.difficulty).to.equal(-0.5);
     });
 
-    it("handles malformed LLM response gracefully", async () => {
-      aiEngine.__setOpenAIClientProviderForTest(() => ({
+    it("throws QuestionGenerationError on malformed LLM response", async () => {
+      llmClient.__setOpenAIClientProviderForTest(() => ({
         chat: {
           completions: {
             create: sinon.stub().resolves({
@@ -70,10 +70,12 @@ describe("Question Generator", () => {
         }
       } as any));
 
-      const result = await generateSingleQuestion(123, "Content...", 0, []);
-
-      expect(result.question).to.equal("Unable to generate question");
-      expect(result.bloomLevel).to.equal("Apply"); // fallback from difficulty=0
+      try {
+        await generateSingleQuestion(123, "Content...", 0, []);
+        expect.fail("Should have thrown");
+      } catch (err) {
+        expect(err).to.be.instanceOf(QuestionGenerationError);
+      }
     });
   });
 
@@ -84,7 +86,7 @@ describe("Question Generator", () => {
         score: 85, correct: true, reasoning: "Good understanding"
       };
 
-      aiEngine.__setOpenAIClientProviderForTest(() => ({
+      llmClient.__setOpenAIClientProviderForTest(() => ({
         chat: {
           completions: {
             create: sinon.stub().resolves({
@@ -115,7 +117,7 @@ describe("Question Generator", () => {
         score: 15, correct: false, reasoning: "Irrelevant answer"
       };
 
-      aiEngine.__setOpenAIClientProviderForTest(() => ({
+      llmClient.__setOpenAIClientProviderForTest(() => ({
         chat: {
           completions: {
             create: sinon.stub().resolves({
@@ -138,7 +140,7 @@ describe("Question Generator", () => {
         reasoning: "Decent answer"
       };
 
-      aiEngine.__setOpenAIClientProviderForTest(() => ({
+      llmClient.__setOpenAIClientProviderForTest(() => ({
         chat: {
           completions: {
             create: sinon.stub().resolves({
@@ -154,8 +156,8 @@ describe("Question Generator", () => {
       expect(result.dimensions.accuracy).to.equal(20);
     });
 
-    it("handles malformed grading response", async () => {
-      aiEngine.__setOpenAIClientProviderForTest(() => ({
+    it("throws GradingError on malformed grading response", async () => {
+      llmClient.__setOpenAIClientProviderForTest(() => ({
         chat: {
           completions: {
             create: sinon.stub().resolves({
@@ -165,11 +167,12 @@ describe("Question Generator", () => {
         }
       } as any));
 
-      const result = await gradeAnswer("Q?", "A", "S", "c");
-      expect(result.score).to.equal(0);
-      expect(result.correct).to.be.false;
-      expect(result.dimensions.accuracy).to.equal(0);
-      expect(result.dimensions.depth).to.equal(0);
+      try {
+        await gradeAnswer("Q?", "A", "S", "c");
+        expect.fail("Should have thrown");
+      } catch (err) {
+        expect(err).to.be.instanceOf(GradingError);
+      }
     });
   });
 });

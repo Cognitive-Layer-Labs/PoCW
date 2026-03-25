@@ -1,7 +1,8 @@
 import { ethers } from "ethers";
 import * as dotenv from "dotenv";
+import * as path from "path";
 
-dotenv.config();
+dotenv.config({ path: path.resolve(__dirname, "..", "..", "..", ".env") });
 
 const { ORACLE_PRIVATE_KEY } = process.env;
 

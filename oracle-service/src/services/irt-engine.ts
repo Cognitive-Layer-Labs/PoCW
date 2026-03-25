@@ -34,7 +34,11 @@ export const IRT_CORRECT_THRESHOLD = 60;
  * P(correct | θ, b) = 1 / (1 + e^(-(θ - b)))
  */
 export function probability(theta: number, difficulty: number): number {
-  return 1 / (1 + Math.exp(-(theta - difficulty)));
+  const z = theta - difficulty;
+  // Clamp to prevent exp() overflow and ensure p*(1-p) never collapses to 0
+  if (z > 500) return 1 - 1e-10;
+  if (z < -500) return 1e-10;
+  return 1 / (1 + Math.exp(-z));
 }
 
 /**
@@ -106,7 +110,9 @@ function estimateTheta(responses: IRTResponse[], initialTheta: number): number {
 
     if (Math.abs(secondDerivative) < 1e-10) break;
 
-    const delta = firstDerivative / secondDerivative;
+    let delta = firstDerivative / secondDerivative;
+    // Dampen large steps to prevent oscillation
+    while (Math.abs(delta) > 2) delta /= 2;
     theta -= delta;
 
     // Clamp θ to reasonable range [-4, 4]
@@ -220,6 +226,7 @@ export function isConverged(state: IRTState): boolean {
  * Maps θ ∈ [-4, 4] to score ∈ [0, 100].
  */
 export function thetaToScore(theta: number): number {
-  const normalized = (theta + 4) / 8; // [0, 1]
-  return Math.round(Math.max(0, Math.min(100, normalized * 100)));
+  const clamped = Math.max(-4, Math.min(4, theta));
+  const normalized = (clamped + 4) / 8; // [0, 1]
+  return Math.round(normalized * 100);
 }

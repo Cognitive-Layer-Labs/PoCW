@@ -1,0 +1,117 @@
+{
+  "theta": 1.4981930777232226,
+  "se": 0.49848484909357677,
+  "score": 69,
+  "questionCount": 14,
+  "bloomLevelsReached": [
+    "Understand",
+    "Apply",
+    "Analyze",
+    "Evaluate",
+    "Create"
+  ],
+  "scoreBreakdown": [
+    {
+      "question": "Given that the fox tricked the bear into losing its tail while trying to catch fish, how would the bear's subsequent attempt to get the fox out of the tree hollow be affected by its injured state and anger?",
+      "score": 0,
+      "difficulty": 1.5,
+      "bloomLevel": "Apply",
+      "correct": false
+    },
+    {
+      "question": "Explain why the bear was unable to get the fox out of the tree hollow, despite its efforts.",
+      "score": 70,
+      "difficulty": 0,
+      "bloomLevel": "Understand",
+      "correct": true
+    },
+    {
+      "question": "If the bear, after losing its tail, wanted to catch fish using the fox's method, what actions would it need to take, and what would be the likely outcome given the conditions described?",
+      "score": 90,
+      "difficulty": 1,
+      "bloomLevel": "Apply",
+      "correct": true
+    },
+    {
+      "question": "Imagine you are the bear. You've been tricked by the fox and lost your tail while trying to catch fish. Now, you are trying to get the fox out of the tree hollow. If you were to use the fox's method of catching fish, what specific steps would you need to perform, and what would be the expected result?",
+      "score": 90,
+      "difficulty": 1.5,
+      "bloomLevel": "Apply",
+      "correct": true
+    },
+    {
+      "question": "What is the relationship between the fox's indirect communication and the bear's eventual loss of its tail?",
+      "score": 90,
+      "difficulty": 1.5,
+      "bloomLevel": "Analyze",
+      "correct": true
+    },
+    {
+      "question": "Analizează cum acțiunile vulpii în timpul încercării ursului de a o scoate din scorbură demonstrează utilizarea comunicării indirecte pentru a perpetua înșelăciunea.",
+      "score": 80,
+      "difficulty": 1.5,
+      "bloomLevel": "Analyze",
+      "correct": true
+    },
+    {
+      "question": "Ce relație există între metoda prin care vulpea a obținut pește și sfatul pe care i-l dă ursului pentru a prinde și el pește?",
+      "score": 100,
+      "difficulty": 0,
+      "bloomLevel": "Analyze",
+      "correct": true
+    },
+    {
+      "question": "Având în vedere că ursul a fost păcălit de vulpe și a rămas fără coadă, ce argumente ai aduce pentru a susține că strategia vulpii de a-l înșela a fost mai eficientă decât o confruntare directă ar fi fost?",
+      "score": 80,
+      "difficulty": 1.5,
+      "bloomLevel": "Evaluate",
+      "correct": true
+    },
+    {
+      "question": "Având în vedere strategia vulpii de a-l păcăli pe urs și rezultatul final (pierderea cozii ursului), evaluează dacă o abordare mai directă din partea ursului ar fi fost mai eficientă pe termen lung, chiar dacă inițial ar fi putut eșua.",
+      "score": 75,
+      "difficulty": 1.5,
+      "bloomLevel": "Evaluate",
+      "correct": true
+    },
+    {
+      "question": "Având în vedere consecințele pierderii cozii ursului și eforturile sale inutile de a scoate vulpea din copac, în ce măsură strategia vulpii de a folosi înșelăciunea directă (păcăleala cu peștele) versus înșelăciunea indirectă (provocarea ursului în timp ce este în scorbură) a fost superioară pentru a-și asigura siguranța și a perpetua dominanța sa?",
+      "score": 90,
+      "difficulty": 2,
+      "bloomLevel": "Evaluate",
+      "correct": true
+    },
+    {
+      "question": "Proiectează o nouă strategie pe care vulpea ar putea să o folosească pentru a evita să fie prinsă de urs, bazându-te pe principiile înșelăciunii indirecte, dar adaptată la o situație în care ursul este conștient de vicleniile ei anterioare.",
+      "score": 0,
+      "difficulty": 2.5,
+      "bloomLevel": "Create",
+      "correct": false
+    },
+    {
+      "question": "Imaginează-ți că ești vulpea și tocmai l-ai păcălit pe urs să-și piardă coada. Acum ursul încearcă să te scoată din scorbură. Creează un dialog amuzant între tine (vulpea) și urs, în care folosești cel puțin două tactici de manipulare pentru a-l descuraja pe urs să te mai scoată din copac, exagerând consecințele pentru el dacă reușește să te prindă.",
+      "score": 90,
+      "difficulty": 2.9,
+      "bloomLevel": "Create",
+      "correct": true
+    },
+    {
+      "question": "Imaginează-ți că tu ești vulpea și ai observat că ursul, deși furios, este încă naiv și ușor de manipulat. Proiectează o nouă strategie prin care vulpea să-l facă pe urs să renunțe la încercarea de a o scoate din scorbură, folosind o combinație de lăudăroșenie (pentru a-i alimenta ego-ul) și amenințări voalate (pentru a-i crea o teamă mai mare decât furia actuală).",
+      "score": 0,
+      "difficulty": 3,
+      "bloomLevel": "Create",
+      "correct": false
+    },
+    {
+      "question": "Proiectează o strategie alternativă pentru vulpe, care să-i permită să obțină hrană fără a recurge la înșelăciunea directă a ursului, dar care să fie la fel de eficientă în asigurarea supraviețuirii sale pe termen lung.",
+      "score": 0,
+      "difficulty": 2.5,
+      "bloomLevel": "Create",
+      "correct": false
+    }
+  ],
+  "contentUrl": "https://amiciiisteti.wordpress.com/wp-content/uploads/2017/01/ursul-pacalit-de-vulpe.pdf",
+  "contentId": 235648842945377,
+  "userAddress": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+  "timestamp": "2026-03-25T00:10:03.522Z"
+}

@@ -198,6 +198,53 @@ describe("IRT Engine (1PL Rasch)", () => {
       expect(thetaToScore(-10)).to.equal(0);
       expect(thetaToScore(10)).to.equal(100);
     });
+
+    it("clamps theta outside [-4, 4] from allCorrect/allWrong branches", () => {
+      expect(thetaToScore(-5.5)).to.equal(0);
+      expect(thetaToScore(6.2)).to.equal(100);
+      expect(thetaToScore(-4)).to.equal(0);
+      expect(thetaToScore(4)).to.equal(100);
+    });
+  });
+
+  describe("probability() numerical stability", () => {
+    it("returns near 1 for extreme positive z without NaN", () => {
+      const p = probability(600, 0);
+      expect(p).to.be.greaterThan(0.99);
+      expect(p).to.be.lessThan(1);
+      expect(Number.isFinite(p)).to.be.true;
+    });
+
+    it("returns near 0 for extreme negative z without NaN", () => {
+      const p = probability(-600, 0);
+      expect(p).to.be.greaterThan(0);
+      expect(p).to.be.lessThan(0.01);
+      expect(Number.isFinite(p)).to.be.true;
+    });
+
+    it("never returns exact 0 or 1 (Fisher Info stays positive)", () => {
+      const p1 = probability(1000, 0);
+      const p2 = probability(-1000, 0);
+      expect(p1 * (1 - p1)).to.be.greaterThan(0);
+      expect(p2 * (1 - p2)).to.be.greaterThan(0);
+    });
+  });
+
+  describe("updateAbility() edge cases", () => {
+    it("handles adversarial alternating pattern without divergence", () => {
+      let state = createIRTState();
+      // Alternate correct at high difficulty, wrong at low difficulty
+      for (let i = 0; i < 10; i++) {
+        if (i % 2 === 0) {
+          state = updateAbility(state, 2, true, 80, "Create");
+        } else {
+          state = updateAbility(state, -2, false, 10, "Remember");
+        }
+      }
+      expect(Number.isFinite(state.theta)).to.be.true;
+      expect(Number.isFinite(state.se)).to.be.true;
+      expect(state.theta).to.be.within(-4, 4);
+    });
   });
 
   describe("isConverged()", () => {

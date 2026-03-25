@@ -1,5 +1,4 @@
 import express, { Request, Response } from "express";
-import { Challenge, generateChallenge, recordAnswers, verifyChallenge } from "./services/ai-engine";
 import { signResult, getOracleAddress } from "./services/signer";
 import {
   createSession,
@@ -11,62 +10,21 @@ import {
 const app = express();
 app.use(express.json());
 
-const challenges = new Map<string, Challenge>();
+function isValidEthereumAddress(addr: string): boolean {
+  return /^0x[0-9a-fA-F]{40}$/.test(addr);
+}
 
-/* ============================================================
- * Legacy endpoints (backward compatible)
- * ============================================================ */
+function isValidContentUrl(url: string): boolean {
+  if (typeof url !== "string") return false;
+  if (url.startsWith("ipfs://")) return url.length > 7;
+  try { new URL(url); return true; } catch { return false; }
+}
 
-app.post("/generate-challenge", async (req: Request, res: Response) => {
-  const { contentUrl, userAddress } = req.body || {};
-  if (!contentUrl || !userAddress) {
-    return res.status(400).json({ error: "contentUrl and userAddress required" });
-  }
+const MAX_ANSWER_LENGTH = 50_000; // 50KB
 
-  try {
-    const challenge = await generateChallenge(contentUrl, userAddress);
-    challenges.set(challenge.challengeId, challenge);
-    return res.json({
-      challengeId: challenge.challengeId,
-      contentId: challenge.contentId,
-      questions: challenge.questions
-    });
-  } catch (err: any) {
-    return res.status(500).json({ error: err.message });
-  }
-});
-
-app.post("/submit-challenge", async (req: Request, res: Response) => {
-  const { challengeId, userAnswers, userAddress } = req.body || {};
-  if (!challengeId || !userAddress || !Array.isArray(userAnswers)) {
-    return res
-      .status(400)
-      .json({ error: "challengeId, userAddress and userAnswers[] required" });
-  }
-
-  const challenge = challenges.get(challengeId);
-  if (!challenge) {
-    return res.status(404).json({ error: "challenge not found" });
-  }
-  if (challenge.userAddress.toLowerCase() !== String(userAddress).toLowerCase()) {
-    return res.status(403).json({ error: "user mismatch" });
-  }
-
-  try {
-    recordAnswers(challengeId, userAnswers);
-    const score = await verifyChallenge(challengeId);
-    const signature = await signResult(challenge.userAddress, challenge.contentId, score);
-    return res.json({
-      status: "success",
-      score,
-      signature,
-      contentId: challenge.contentId,
-      oracle: getOracleAddress()
-    });
-  } catch (err: any) {
-    return res.status(500).json({ error: err.message });
-  }
-});
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : "Internal server error";
+}
 
 /* ============================================================
  * Adaptive Testing endpoints (KAQG + IRT)
@@ -81,6 +39,12 @@ app.post("/api/session/start", async (req: Request, res: Response) => {
   if (!contentUrl || !userAddress) {
     return res.status(400).json({ error: "contentUrl and userAddress required" });
   }
+  if (!isValidEthereumAddress(userAddress)) {
+    return res.status(400).json({ error: "Invalid Ethereum address format" });
+  }
+  if (!isValidContentUrl(contentUrl)) {
+    return res.status(400).json({ error: "Invalid content URL" });
+  }
 
   try {
     const result = await createSession(contentUrl, userAddress);
@@ -93,8 +57,8 @@ app.post("/api/session/start", async (req: Request, res: Response) => {
         bloomLevel: result.question.bloomLevel
       }
     });
-  } catch (err: any) {
-    return res.status(500).json({ error: err.message });
+  } catch (err: unknown) {
+    return res.status(500).json({ error: errorMessage(err) });
   }
 });
 
@@ -106,6 +70,9 @@ app.post("/api/session/answer", async (req: Request, res: Response) => {
   const { sessionId, answer } = req.body || {};
   if (!sessionId || typeof answer !== "string") {
     return res.status(400).json({ error: "sessionId and answer required" });
+  }
+  if (answer.length === 0 || answer.length > MAX_ANSWER_LENGTH) {
+    return res.status(400).json({ error: `Answer must be 1-${MAX_ANSWER_LENGTH} characters` });
   }
 
   const session = getSession(sessionId);
@@ -134,8 +101,8 @@ app.post("/api/session/answer", async (req: Request, res: Response) => {
       },
       progress: result.progress
     });
-  } catch (err: any) {
-    return res.status(500).json({ error: err.message });
+  } catch (err: unknown) {
+    return res.status(500).json({ error: errorMessage(err) });
   }
 });
 
@@ -147,6 +114,9 @@ app.post("/api/session/result", async (req: Request, res: Response) => {
   const { sessionId, userAddress } = req.body || {};
   if (!sessionId || !userAddress) {
     return res.status(400).json({ error: "sessionId and userAddress required" });
+  }
+  if (!isValidEthereumAddress(userAddress)) {
+    return res.status(400).json({ error: "Invalid Ethereum address format" });
   }
 
   const session = getSession(sessionId);
@@ -171,10 +141,9 @@ app.post("/api/session/result", async (req: Request, res: Response) => {
       contentId: result.contentId,
       oracle: getOracleAddress()
     });
-  } catch (err: any) {
-    return res.status(500).json({ error: err.message });
+  } catch (err: unknown) {
+    return res.status(500).json({ error: errorMessage(err) });
   }
 });
 
 export default app;
-

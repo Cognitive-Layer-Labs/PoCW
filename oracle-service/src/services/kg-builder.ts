@@ -8,7 +8,7 @@
 import { readFileSync } from "fs";
 import * as path from "path";
 import * as yaml from "js-yaml";
-import { getOpenAIClient } from "./ai-engine";
+import { getOpenAIClient } from "./llm-client";
 
 export interface KGNode {
   id: string;

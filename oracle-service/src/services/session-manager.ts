@@ -7,7 +7,7 @@
  * Wires together: Parser, KG Builder, KG Store, IRT Engine, KAQG Generator, IPFS Store.
  */
 
-import { randomUUID } from "crypto";
+import { randomUUID, createHash } from "crypto";
 import { parseContentToText, chunkText } from "./parser";
 import { extractKnowledgeGraph } from "./kg-builder";
 import { storeGraph, graphExists } from "./kg-store";
@@ -53,18 +53,65 @@ export interface AdaptiveSession {
 
 const sessions = new Map<string, AdaptiveSession>();
 
+/** Session TTL: 30 minutes */
+const SESSION_TTL_MS = 30 * 60 * 1000;
+/** Cleanup interval: every 5 minutes */
+const CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
+/** Maximum concurrent sessions */
+const MAX_SESSIONS = 10000;
+
+/** In-memory lock to prevent duplicate KG builds for the same contentId */
+const graphBuildLocks = new Map<number, Promise<void>>();
+
+function cleanupExpiredSessions(): void {
+  const now = Date.now();
+  for (const [id, session] of sessions) {
+    if (now - session.createdAt > SESSION_TTL_MS) {
+      sessions.delete(id);
+    }
+  }
+}
+
+let cleanupTimer: ReturnType<typeof setInterval> | null = setInterval(
+  cleanupExpiredSessions,
+  CLEANUP_INTERVAL_MS
+);
+
+/** Stop the cleanup timer (for graceful shutdown and testing) */
+export function stopCleanupTimer(): void {
+  if (cleanupTimer) {
+    clearInterval(cleanupTimer);
+    cleanupTimer = null;
+  }
+}
+
+/**
+ * Deterministic contentId from URL.
+ * Same URL always maps to the same contentId, preventing collisions
+ * and making graphExists() work correctly for cached KGs.
+ */
+function contentUrlToId(url: string): number {
+  const hash = createHash("sha256").update(url).digest();
+  // Use first 6 bytes as a positive integer (48-bit, safe for JS number)
+  return hash.readUIntBE(0, 6);
+}
+
 /**
  * Select a chunk index weighted toward least-used chunks.
+ * Uses cumulative-sum approach to avoid floating-point drift.
  */
 function selectChunkIndex(chunkUsageCount: number[]): number {
   const maxUsage = Math.max(...chunkUsageCount);
-  // Weight = (maxUsage + 1 - usage) so unused chunks have highest weight
   const weights = chunkUsageCount.map(u => maxUsage + 1 - u);
-  const totalWeight = weights.reduce((a, b) => a + b, 0);
-  let r = Math.random() * totalWeight;
-  for (let i = 0; i < weights.length; i++) {
-    r -= weights[i];
-    if (r <= 0) return i;
+  const cumWeights: number[] = [];
+  let sum = 0;
+  for (const w of weights) {
+    sum += w;
+    cumWeights.push(sum);
+  }
+  const r = Math.random() * sum;
+  for (let i = 0; i < cumWeights.length; i++) {
+    if (r < cumWeights[i]) return i;
   }
   return weights.length - 1;
 }
@@ -80,29 +127,39 @@ export async function createSession(
   contentUrl: string,
   userAddress: string
 ): Promise<{ sessionId: string; contentId: number; question: GeneratedQuestion }> {
+  if (sessions.size >= MAX_SESSIONS) {
+    throw new Error("Server at capacity — too many active sessions");
+  }
+
   const contentText = await parseContentToText(contentUrl);
-  const contentId = Date.now();
+  const contentId = contentUrlToId(contentUrl);
 
   // Split into overlapping chunks
   const chunks = chunkText(contentText);
 
-  // Build KG from sampled chunks (cap at MAX_KG_CHUNKS evenly spaced)
-  if (!(await graphExists(contentId))) {
-    let sampled: string[];
-    if (chunks.length <= MAX_KG_CHUNKS) {
-      sampled = chunks;
-    } else {
-      const step = chunks.length / MAX_KG_CHUNKS;
-      sampled = Array.from({ length: MAX_KG_CHUNKS }, (_, i) =>
-        chunks[Math.min(Math.floor(i * step), chunks.length - 1)]
-      );
-    }
-    // Build KG from each sampled chunk (they'll merge into the same contentId graph)
-    for (const chunk of sampled) {
-      const graph = await extractKnowledgeGraph(contentId, chunk);
-      await storeGraph(graph);
-    }
+  // Build KG from sampled chunks (cap at MAX_KG_CHUNKS evenly spaced).
+  // Use a lock so concurrent sessions for the same URL don't duplicate work.
+  if (!graphBuildLocks.has(contentId)) {
+    const buildPromise = (async () => {
+      if (!(await graphExists(contentId))) {
+        let sampled: string[];
+        if (chunks.length <= MAX_KG_CHUNKS) {
+          sampled = chunks;
+        } else {
+          const step = chunks.length / MAX_KG_CHUNKS;
+          sampled = Array.from({ length: MAX_KG_CHUNKS }, (_, i) =>
+            chunks[Math.min(Math.floor(i * step), chunks.length - 1)]
+          );
+        }
+        for (const chunk of sampled) {
+          const graph = await extractKnowledgeGraph(contentId, chunk);
+          await storeGraph(graph);
+        }
+      }
+    })();
+    graphBuildLocks.set(contentId, buildPromise);
   }
+  await graphBuildLocks.get(contentId);
 
   const irtState = createIRTState();
   const chunkUsageCount = new Array(chunks.length).fill(0);
