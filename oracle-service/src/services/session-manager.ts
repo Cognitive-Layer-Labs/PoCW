@@ -90,7 +90,7 @@ export function stopCleanupTimer(): void {
  * Same URL always maps to the same contentId, preventing collisions
  * and making graphExists() work correctly for cached KGs.
  */
-function contentUrlToId(url: string): number {
+export function contentUrlToId(url: string): number {
   const hash = createHash("sha256").update(url).digest();
   // Use first 6 bytes as a positive integer (48-bit, safe for JS number)
   return hash.readUIntBE(0, 6);
@@ -100,7 +100,7 @@ function contentUrlToId(url: string): number {
  * Select a chunk index weighted toward least-used chunks.
  * Uses cumulative-sum approach to avoid floating-point drift.
  */
-function selectChunkIndex(chunkUsageCount: number[]): number {
+export function selectChunkIndex(chunkUsageCount: number[]): number {
   const maxUsage = Math.max(...chunkUsageCount);
   const weights = chunkUsageCount.map(u => maxUsage + 1 - u);
   const cumWeights: number[] = [];

@@ -1,0 +1,65 @@
+{
+  "theta": -0.4832360926080376,
+  "se": 0.630760238537255,
+  "score": 44,
+  "questionCount": 7,
+  "bloomLevelsReached": [
+    "Remember",
+    "Understand"
+  ],
+  "scoreBreakdown": [
+    {
+      "question": "Ursul a reușit să scoată vulpea din scorbura copacului folosind o creangă cu cârlig.",
+      "score": 100,
+      "difficulty": -1.5,
+      "bloomLevel": "Remember",
+      "correct": true
+    },
+    {
+      "question": "Vulpea a obținut pește prin înșelăciune, pretinzând că este moartă în fața unui țăran.",
+      "score": 100,
+      "difficulty": -1.5,
+      "bloomLevel": "Remember",
+      "correct": true
+    },
+    {
+      "question": "Ce personaj este prezentat ca fiind principal în povestea \"Ursul păcălit de vulpe\"?",
+      "score": 0,
+      "difficulty": -1.5,
+      "bloomLevel": "Remember",
+      "correct": false
+    },
+    {
+      "question": "Explicați cum inteligența vulpii i-a permis să creeze o păcăleală pentru urs, conform textului.",
+      "score": 20,
+      "difficulty": 0,
+      "bloomLevel": "Understand",
+      "correct": false
+    },
+    {
+      "question": "Explicați cum a reușit vulpea să-l păcălească pe urs în situația descrisă, folosind dialogul dintre ele.",
+      "score": 0,
+      "difficulty": 0.5,
+      "bloomLevel": "Understand",
+      "correct": false
+    },
+    {
+      "question": "Ce obiect a folosit ursul pentru a încerca să scoată vulpea din scorbura copacului?",
+      "score": 100,
+      "difficulty": 0.5,
+      "bloomLevel": "Remember",
+      "correct": true
+    },
+    {
+      "question": "Explică de ce vulpea a ales să se prefacă moartă în fața țăranului care venea cu carul.",
+      "score": 65,
+      "difficulty": 0.5,
+      "bloomLevel": "Understand",
+      "correct": true
+    }
+  ],
+  "contentUrl": "d65245935361637d649568d4e451dee0e77c5e977d66b2aba6473b874a3767b6",
+  "contentId": 235648842945377,
+  "userAddress": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+  "timestamp": "2026-03-26T10:47:36.796Z"
+}

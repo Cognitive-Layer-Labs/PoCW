@@ -1,23 +1,20 @@
+/**
+ * PoCW Protocol — 3rd Party Integration Demo
+ *
+ * Demonstrates the full flow: index → verify → on-chain mint.
+ * Run: npx hardhat run scripts/simulate-flow.ts --network localhost
+ */
+
 import hre from "hardhat";
-import { ethers } from "hardhat";
 import readline from "readline";
+import { PoCW } from "../oracle-service/src/sdk/index";
+import type { VerifyQuestion } from "../oracle-service/src/sdk/types";
 
-import {
-  createSession,
-  submitAnswer,
-  getSessionResult,
-  __clearSessionsForTest
-} from "../oracle-service/src/services/session-manager";
-import { initFalkorDB, closeFalkorDB } from "../oracle-service/src/services/kg-store";
-import { thetaToScore } from "../oracle-service/src/services/irt-engine";
-
-/* helper ca sa citim input din terminal */
 function ask(question: string): Promise<string> {
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout
   });
-
   return new Promise((resolve) => {
     rl.question(question, (answer) => {
       rl.close();
@@ -27,106 +24,122 @@ function ask(question: string): Promise<string> {
 }
 
 async function main() {
-  __clearSessionsForTest();
-  await initFalkorDB();
+  /* ── Initialize PoCW SDK ── */
+  const pocw = new PoCW();
+  await pocw.init();
 
-  /* conectare la hardhat node */
+  /* ── Deploy contracts ── */
   const [deployer, oracle, user] = await hre.ethers.getSigners();
 
   console.log("\n=== ACTORS ===");
   console.log("Oracle:", oracle.address);
   console.log("User:  ", user.address);
 
-  /* deploy SBT */
   const SBT = await hre.ethers.getContractFactory("PoCW_SBT");
   const sbt = await SBT.deploy();
   await sbt.waitForDeployment();
 
-  /* deploy controller */
   const Controller = await hre.ethers.getContractFactory("PoCW_Controller");
   const controller = await Controller.deploy(
     oracle.address,
     await sbt.getAddress()
   );
   await controller.waitForDeployment();
-
   await sbt.transferOwnership(await controller.getAddress());
 
   console.log("\nContracts deployed");
 
-  /* === ADAPTIVE TESTING FLOW === */
-  // const contentUrl = "https://bitcoin.org/bitcoin.pdf";
-  // const contentUrl = "https://microsoft.github.io/Web-Dev-For-Beginners/pdf/readme.pdf";
+  /* ── Step 1: Index Content ── */
   const contentUrl = "https://amiciiisteti.wordpress.com/wp-content/uploads/2017/01/ursul-pacalit-de-vulpe.pdf";
-  // const contentUrl = "https://ia902903.us.archive.org/13/items/letterstoayoungpoetpdfdrive.com/Letters%20to%20a%20Young%20Poet%20%28%20PDFDrive.com%20%29.pdf";
 
-  console.log("\n=== STARTING ADAPTIVE SESSION ===");
-  console.log("Building knowledge graph & generating first question...\n");
+  console.log("\n=== INDEXING CONTENT ===");
+  console.log("Source:", contentUrl);
 
-  const session = await createSession(contentUrl, user.address);
-  let questionNumber = 1;
-  let currentQuestion = session.question;
-  let converged = false;
+  const indexResult = await pocw.index(contentUrl);
+  console.log("Knowledge ID:", indexResult.knowledgeId);
+  console.log("Status:", indexResult.status);
 
-  while (!converged) {
-    console.log(`--- Question ${questionNumber} [${currentQuestion.bloomLevel}] (difficulty: ${currentQuestion.difficulty.toFixed(2)}) ---`);
-    console.log(`Q: ${currentQuestion.question}\n`);
+  if (indexResult.status !== "ready") {
+    console.log("Waiting for indexing to complete...");
+    await pocw.waitForIndex(indexResult.knowledgeId);
+    console.log("Indexing complete!");
+  }
 
-    const answer = await ask(`Your answer: `);
+  /* ── Step 2: Verify (callback mode) ── */
+  console.log("\n=== STARTING VERIFICATION ===");
+  console.log("Question types: open, mcq, true_false");
+  console.log("");
 
-    console.log("\nGrading...");
-    const result = await submitAnswer(session.sessionId, answer);
+  const result = await pocw.verify(indexResult.knowledgeId, user.address, {
+    max_questions: 7,
+    difficulty: 0.15,
+    threshold: 0.5,
+    q_types: ["open", "mcq", "true_false"],
+    response: "detailed",
+    attest: "onchain",
+    language: "romanian",
+    chain: {
+      controllerAddress: await controller.getAddress(),
+      sbtAddress: await sbt.getAddress(),
+    },
+    onQuestion: async (q: VerifyQuestion) => {
+      console.log(`--- Q${q.number}/${q.totalQuestions} [${q.type}] [${q.bloomLevel}] (d: ${q.difficulty.toFixed(2)}) ---`);
 
-    console.log(`  Score: ${result.gradeResult.score}/100 (${result.gradeResult.correct ? "CORRECT" : "INCORRECT"})`);
-    const d = result.gradeResult.dimensions;
-    console.log(`    Accuracy: ${d.accuracy}/25 | Depth: ${d.depth}/25 | Specificity: ${d.specificity}/25 | Reasoning: ${d.reasoning}/25`);
-    console.log(`  ${result.gradeResult.reasoning}`);
-    console.log(`  θ = ${result.progress.currentTheta.toFixed(3)}, SE = ${result.progress.currentSE.toFixed(3)}, Level: ${result.progress.bloomLevel}`);
+      if (q.type === "mcq" && q.options) {
+        console.log(`Q: ${q.text}\n`);
+        q.options.forEach((opt, i) =>
+          console.log(`  ${String.fromCharCode(65 + i)}. ${opt}`)
+        );
+        console.log("");
+        return await ask("Your answer (A/B/C/D): ");
+      }
 
-    if (result.status === "converged") {
-      converged = true;
-      console.log(`\n=== CONVERGED after ${result.progress.questionNumber} questions ===`);
-    } else {
-      currentQuestion = result.nextQuestion!;
-      questionNumber++;
-      console.log("");
+      if (q.type === "true_false") {
+        console.log(`Statement: ${q.text}\n`);
+        return await ask("True or False: ");
+      }
+
+      // open or scenario
+      console.log(`Q: ${q.text}\n`);
+      return await ask("Your answer: ");
+    }
+  });
+
+  /* ── Print Result ── */
+  console.log("\n=== COGNITIVE PROFILE ===");
+  console.log(`  Score:      ${result.score}/100`);
+  console.log(`  Passed:     ${result.passed}`);
+  console.log(`  Theta:      ${result.theta.toFixed(3)}`);
+  console.log(`  SE:         ${result.se.toFixed(3)}`);
+  console.log(`  Converged:  ${result.converged}`);
+  console.log(`  CI:         [${result.confidence_interval[0]}, ${result.confidence_interval[1]}]`);
+  console.log(`  Questions:  ${result.questions_asked}`);
+
+  if (result.response_detail) {
+    console.log("\n  Breakdown:");
+    for (const q of result.response_detail) {
+      console.log(`    [${q.type}] ${q.correct ? "CORRECT" : "WRONG"} (${q.score}/100) - ${q.bloomLevel}`);
     }
   }
 
-  /* === GET RESULT === */
-  console.log("\n=== COGNITIVE PROFILE ===");
-  const finalResult = await getSessionResult(session.sessionId);
+  /* ── Step 3: Mint SBT ── */
+  if (result.attestation?.type === "onchain") {
+    console.log("\n=== MINTING SBT ===");
+    const att = result.attestation;
 
-  console.log(`  Final θ:    ${finalResult.theta.toFixed(3)}`);
-  console.log(`  Score:      ${finalResult.score}/100`);
-  console.log(`  Questions:  ${finalResult.cognitiveProfile.questionCount}`);
-  console.log(`  Bloom's:    ${finalResult.cognitiveProfile.bloomLevelsReached.join(", ") || "none"}`);
-  console.log(`  IPFS hash:  ${finalResult.ipfsHash}`);
+    await controller.verifyAndMint(
+      user.address,
+      att.contentId,
+      result.score,
+      att.signature
+    );
 
-  const score = finalResult.score;
+    const balance = await sbt.balanceOf(user.address, att.contentId);
+    console.log("SBT balance:", balance.toString());
+  }
 
-  console.log("\n=== MINTING SBT ===");
-
-  const hash = ethers.solidityPackedKeccak256(
-    ["address", "uint256", "uint256"],
-    [user.address, session.contentId, score]
-  );
-
-  const signature = await oracle.signMessage(ethers.getBytes(hash));
-
-  await controller.verifyAndMint(
-    user.address,
-    session.contentId,
-    score,
-    signature
-  );
-
-  const balance = await sbt.balanceOf(user.address, session.contentId);
-  console.log("SBT balance:", balance.toString());
-
-  await closeFalkorDB();
-
-  console.log("\n✅ FLOW COMPLETED");
+  await pocw.close();
+  console.log("\nFlow completed");
 }
 
 main().catch((err) => {

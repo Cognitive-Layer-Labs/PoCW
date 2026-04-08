@@ -1,148 +1,168 @@
 import express, { Request, Response } from "express";
-import { signResult, getOracleAddress } from "./services/signer";
-import {
-  createSession,
-  submitAnswer,
-  getSessionResult,
-  getSession
-} from "./services/session-manager";
+import { PoCW } from "./sdk/index";
+import { VerifySession } from "./sdk/verify-session";
+import { PoCWError, PoCWErrorCode } from "./sdk/types";
 
 const app = express();
 app.use(express.json());
 
-function isValidEthereumAddress(addr: string): boolean {
-  return /^0x[0-9a-fA-F]{40}$/.test(addr);
+// Shared PoCW instance (initialized by server.ts)
+let pocw: PoCW | null = null;
+
+export function setPoCWInstance(instance: PoCW): void {
+  pocw = instance;
 }
 
-function isValidContentUrl(url: string): boolean {
-  if (typeof url !== "string") return false;
-  if (url.startsWith("ipfs://")) return url.length > 7;
-  try { new URL(url); return true; } catch { return false; }
+function getPoCW(): PoCW {
+  if (!pocw) throw new PoCWError("INVALID_CONFIG", "PoCW not initialized");
+  return pocw;
 }
 
-const MAX_ANSWER_LENGTH = 50_000; // 50KB
+// Active verify sessions (keyed by sessionId)
+const verifySessions = new Map<string, VerifySession>();
 
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : "Internal server error";
-}
+const MAX_ANSWER_LENGTH = 50_000;
 
-/* ============================================================
- * Adaptive Testing endpoints (KAQG + IRT)
- * ============================================================ */
+// ─── Error Mapping ───────────────────────────────────────────────────────────
 
-/**
- * Start a new adaptive session.
- * POST /api/session/start { contentUrl, userAddress }
- */
-app.post("/api/session/start", async (req: Request, res: Response) => {
-  const { contentUrl, userAddress } = req.body || {};
-  if (!contentUrl || !userAddress) {
-    return res.status(400).json({ error: "contentUrl and userAddress required" });
-  }
-  if (!isValidEthereumAddress(userAddress)) {
-    return res.status(400).json({ error: "Invalid Ethereum address format" });
-  }
-  if (!isValidContentUrl(contentUrl)) {
-    return res.status(400).json({ error: "Invalid content URL" });
-  }
+const HTTP_STATUS: Record<PoCWErrorCode, number> = {
+  CONTENT_NOT_FOUND: 404,
+  INDEXING_IN_PROGRESS: 202,
+  INDEXING_FAILED: 422,
+  INVALID_CONFIG: 400,
+  SESSION_EXPIRED: 410,
+  SESSION_NOT_ACTIVE: 409,
+  LLM_ERROR: 503,
+  GRAPH_DB_ERROR: 503,
+  ATTESTATION_ERROR: 500,
+  CAPACITY_EXCEEDED: 429,
+};
 
-  try {
-    const result = await createSession(contentUrl, userAddress);
-    return res.json({
-      sessionId: result.sessionId,
-      contentId: result.contentId,
-      question: {
-        text: result.question.question,
-        questionNumber: 1,
-        bloomLevel: result.question.bloomLevel
-      }
-    });
-  } catch (err: unknown) {
-    return res.status(500).json({ error: errorMessage(err) });
-  }
-});
-
-/**
- * Submit an answer to the current question.
- * POST /api/session/answer { sessionId, answer }
- */
-app.post("/api/session/answer", async (req: Request, res: Response) => {
-  const { sessionId, answer } = req.body || {};
-  if (!sessionId || typeof answer !== "string") {
-    return res.status(400).json({ error: "sessionId and answer required" });
-  }
-  if (answer.length === 0 || answer.length > MAX_ANSWER_LENGTH) {
-    return res.status(400).json({ error: `Answer must be 1-${MAX_ANSWER_LENGTH} characters` });
-  }
-
-  const session = getSession(sessionId);
-  if (!session) {
-    return res.status(404).json({ error: "session not found" });
-  }
-
-  try {
-    const result = await submitAnswer(sessionId, answer);
-
-    if (result.status === "converged") {
-      return res.json({
-        status: "converged",
-        gradeResult: result.gradeResult,
-        progress: result.progress
-      });
+function sendError(res: Response, err: unknown): void {
+  if (err instanceof PoCWError) {
+    const status = HTTP_STATUS[err.code] || 500;
+    const payload: any = { error: err.message, code: err.code };
+    if (err.code === "INDEXING_IN_PROGRESS") {
+      res.set("Retry-After", "5");
     }
+    res.status(status).json(payload);
+  } else {
+    const message = err instanceof Error ? err.message : "Internal server error";
+    res.status(500).json({ error: message });
+  }
+}
 
-    return res.json({
-      status: "next",
-      gradeResult: result.gradeResult,
-      question: {
-        text: result.nextQuestion!.question,
-        questionNumber: result.progress.questionNumber + 1,
-        bloomLevel: result.nextQuestion!.bloomLevel
-      },
-      progress: result.progress
-    });
-  } catch (err: unknown) {
-    return res.status(500).json({ error: errorMessage(err) });
+// ─── Index Routes ────────────────────────────────────────────────────────────
+
+/**
+ * POST /api/index
+ * Index content for later verification.
+ * Body: { source: string }
+ */
+app.post("/api/index", async (req: Request, res: Response) => {
+  const { source } = req.body || {};
+  if (!source || typeof source !== "string") {
+    return res.status(400).json({ error: "source is required", code: "INVALID_CONFIG" });
+  }
+
+  try {
+    const result = await getPoCW().index(source);
+    const status = result.status === "ready" ? 200 : 202;
+    if (status === 202) res.set("Retry-After", "5");
+    return res.status(status).json(result);
+  } catch (err) {
+    return sendError(res, err);
   }
 });
 
 /**
- * Get final result of a converged session.
- * POST /api/session/result { sessionId, userAddress }
+ * GET /api/index/:knowledgeId
+ * Check indexing status.
  */
-app.post("/api/session/result", async (req: Request, res: Response) => {
-  const { sessionId, userAddress } = req.body || {};
-  if (!sessionId || !userAddress) {
-    return res.status(400).json({ error: "sessionId and userAddress required" });
+app.get("/api/index/:knowledgeId", (req: Request, res: Response) => {
+  try {
+    const result = getPoCW().getIndexStatus(req.params.knowledgeId);
+    const status = result.status === "ready" ? 200 : 202;
+    if (status === 202) res.set("Retry-After", "5");
+    return res.status(status).json(result);
+  } catch (err) {
+    return sendError(res, err);
   }
-  if (!isValidEthereumAddress(userAddress)) {
-    return res.status(400).json({ error: "Invalid Ethereum address format" });
-  }
+});
 
-  const session = getSession(sessionId);
-  if (!session) {
-    return res.status(404).json({ error: "session not found" });
-  }
-  if (session.userAddress.toLowerCase() !== String(userAddress).toLowerCase()) {
-    return res.status(403).json({ error: "user mismatch" });
+// ─── Verify Routes ───────────────────────────────────────────────────────────
+
+/**
+ * POST /api/verify
+ * Start a verification session.
+ * Body: { knowledgeId, subject, config? }
+ */
+app.post("/api/verify", async (req: Request, res: Response) => {
+  const { knowledgeId, subject, config } = req.body || {};
+  if (!knowledgeId || !subject) {
+    return res.status(400).json({ error: "knowledgeId and subject required", code: "INVALID_CONFIG" });
   }
 
   try {
-    const result = await getSessionResult(sessionId);
-    const signature = await signResult(userAddress, result.contentId, result.score);
+    // Always use session mode for HTTP API (no onQuestion callback)
+    const safeConfig = { ...(config || {}) };
+    delete safeConfig.onQuestion;
+    const session = (await getPoCW().verify(knowledgeId, String(subject), safeConfig)) as unknown as VerifySession;
+    verifySessions.set(session.sessionId, session);
 
     return res.json({
-      status: "success",
-      score: result.score,
-      theta: result.theta,
-      cognitiveProfile: result.cognitiveProfile,
-      ipfsHash: result.ipfsHash,
-      signature,
-      contentId: result.contentId,
-      oracle: getOracleAddress()
+      sessionId: session.sessionId,
+      question: session.currentQuestion,
     });
-  } catch (err: unknown) {
-    return res.status(500).json({ error: errorMessage(err) });
+  } catch (err) {
+    return sendError(res, err);
+  }
+});
+
+/**
+ * POST /api/verify/:sessionId/answer
+ * Submit an answer to the current question.
+ * Body: { answer: string }
+ */
+app.post("/api/verify/:sessionId/answer", async (req: Request, res: Response) => {
+  const { answer } = req.body || {};
+  if (typeof answer !== "string" || answer.length === 0 || answer.length > MAX_ANSWER_LENGTH) {
+    return res.status(400).json({
+      error: `answer is required (1-${MAX_ANSWER_LENGTH} characters)`,
+      code: "INVALID_CONFIG"
+    });
+  }
+
+  const session = verifySessions.get(req.params.sessionId);
+  if (!session) {
+    return res.status(404).json({ error: "Session not found", code: "CONTENT_NOT_FOUND" });
+  }
+
+  try {
+    const feedback = await session.submitAnswer(answer);
+    return res.json(feedback);
+  } catch (err) {
+    return sendError(res, err);
+  }
+});
+
+/**
+ * GET /api/verify/:sessionId/result
+ * Get the final result of a completed session.
+ */
+app.get("/api/verify/:sessionId/result", async (req: Request, res: Response) => {
+  const session = verifySessions.get(req.params.sessionId);
+  if (!session) {
+    return res.status(404).json({ error: "Session not found", code: "CONTENT_NOT_FOUND" });
+  }
+
+  try {
+    const result = await session.getResult();
+    // Cleanup completed session
+    verifySessions.delete(req.params.sessionId);
+    return res.json(result);
+  } catch (err) {
+    return sendError(res, err);
   }
 });
 

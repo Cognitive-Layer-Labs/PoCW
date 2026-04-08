@@ -1,0 +1,51 @@
+{
+  "theta": 0.6163378407105143,
+  "se": 0.6797135112714894,
+  "score": 58,
+  "questionCount": 5,
+  "bloomLevelsReached": [
+    "Apply",
+    "Analyze"
+  ],
+  "scoreBreakdown": [
+    {
+      "question": "Ursul a încercat să prindă pește folosind metoda vulpii, dar a sfârșit prin a-și pierde coada din cauza frigului și a gheții.",
+      "score": 100,
+      "difficulty": 0.5,
+      "bloomLevel": "Apply",
+      "correct": true
+    },
+    {
+      "question": "Ursul a aplicat o metodă de a scoate vulpea afară din scorbură, care a implicat acțiunea de a trage, dar nu a reușit să prindă pește în acest proces.",
+      "score": 100,
+      "difficulty": 0.5,
+      "bloomLevel": "Apply",
+      "correct": true
+    },
+    {
+      "question": "Analizând dialogul dintre urs și vulpe, cum a reușit vulpea să manipuleze ursul pentru a-și asigura propria siguranță și a-l face pe urs să eșueze în acțiunea sa?",
+      "score": 100,
+      "difficulty": 1.5,
+      "bloomLevel": "Analyze",
+      "correct": true
+    },
+    {
+      "question": "Având în vedere povestea, care este cel mai potrivit mod de a descrie strategia vulpii în relație cu ursul?",
+      "score": 0,
+      "difficulty": 1.5,
+      "bloomLevel": "Create",
+      "correct": false
+    },
+    {
+      "question": "Cum a folosit vulpea comunicarea indirectă pentru a manipula ursul în timpul acțiunii de a fi scoasă afară din scorbură?",
+      "score": 20,
+      "difficulty": 1.5,
+      "bloomLevel": "Analyze",
+      "correct": false
+    }
+  ],
+  "contentUrl": "d65245935361637d649568d4e451dee0e77c5e977d66b2aba6473b874a3767b6",
+  "contentId": 235648842945377,
+  "userAddress": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+  "timestamp": "2026-03-25T11:31:40.807Z"
+}

@@ -1,0 +1,20 @@
+{
+  "theta": -0.34657359027997264,
+  "se": 0.8970718221660766,
+  "score": 46,
+  "questionCount": 1,
+  "bloomLevelsReached": [],
+  "scoreBreakdown": [
+    {
+      "question": "What is concept A?",
+      "score": 15,
+      "difficulty": 0,
+      "bloomLevel": "Understand",
+      "correct": false
+    }
+  ],
+  "contentUrl": "kid1",
+  "contentId": 1,
+  "userAddress": "user1",
+  "timestamp": "2026-03-25T11:17:53.740Z"
+}
