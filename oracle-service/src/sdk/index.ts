@@ -20,6 +20,9 @@ import {
   markReady,
   markFailed,
   incrementUsage,
+  recoverStuckIndexingJobs,
+  updateMetadata,
+  listContent,
 } from "./content-store";
 import { VerifySession } from "./verify-session";
 import {
@@ -31,6 +34,7 @@ import {
   resolveConfig,
   PoCWError,
   VerifyQuestion,
+  ContentRow,
 } from "./types";
 
 export { PoCW };
@@ -54,8 +58,39 @@ export type {
 
 const MAX_KG_CHUNKS = 15;
 
-/** Cached content text + chunks for indexed content (avoids re-parsing) */
-const contentCache = new Map<string, { text: string; chunks: string[] }>();
+// 3.7 — LRU cache replaces unbounded Map to prevent OOM under heavy indexing load.
+class LRUCache<K, V> {
+  private map = new Map<K, V>();
+  constructor(private readonly maxSize: number) {}
+
+  get(k: K): V | undefined {
+    const v = this.map.get(k);
+    if (v !== undefined) {
+      // Move to end (most-recently-used position)
+      this.map.delete(k);
+      this.map.set(k, v);
+    }
+    return v;
+  }
+
+  set(k: K, v: V): void {
+    if (this.map.has(k)) {
+      this.map.delete(k);
+    } else if (this.map.size >= this.maxSize) {
+      // Evict least-recently-used (first entry)
+      const firstKey = this.map.keys().next().value;
+      if (firstKey !== undefined) this.map.delete(firstKey);
+    }
+    this.map.set(k, v);
+  }
+
+  clear(): void {
+    this.map.clear();
+  }
+}
+
+/** Cached content text + chunks for indexed content (avoids re-parsing). LRU, max 100 entries. */
+const contentCache = new LRUCache<string, { text: string; chunks: string[] }>(100);
 
 /** Active background indexing promises */
 const indexingJobs = new Map<string, Promise<void>>();
@@ -73,6 +108,11 @@ class PoCW {
     if (this.initialized) return;
     await initFalkorDB();
     initContentStore(this.dbPath);
+    // 3.1 — Recover jobs stuck in 'indexing' state from a previous crash/restart
+    const recovered = await recoverStuckIndexingJobs(15);
+    if (recovered > 0) {
+      console.warn(`[PoCW] Recovered ${recovered} stuck indexing job(s) from previous session`);
+    }
     this.initialized = true;
   }
 
@@ -91,7 +131,7 @@ class PoCW {
     this.ensureInit();
 
     const knowledgeId = computeKnowledgeId(source);
-    const numericId = contentUrlToId(source);
+    const numericId = contentUrlToId(normalizeSource(source));
 
     // Check if already indexed
     const existing = getContent(knowledgeId);
@@ -108,8 +148,8 @@ class PoCW {
     const contentType = detectContentType(source);
 
     // Insert as pending
-    insertContent(knowledgeId, contentType, source, numericId);
-    markIndexing(knowledgeId);
+    await insertContent(knowledgeId, contentType, source, numericId);
+    await markIndexing(knowledgeId);
 
     // Start background indexing
     const job = this.runIndexing(knowledgeId, source, numericId);
@@ -132,6 +172,19 @@ class PoCW {
       contentId: row.content_id ?? undefined,
       error: row.error ?? undefined,
     };
+  }
+
+  /**
+   * List all indexed content. Returns paginated results.
+   * Options: { status?, limit?, offset? }
+   */
+  listContent(options?: {
+    status?: string;
+    limit?: number;
+    offset?: number;
+  }): { rows: ContentRow[]; total: number } {
+    this.ensureInit();
+    return listContent(options);
   }
 
   /**
@@ -238,7 +291,9 @@ class PoCW {
     contentId: number
   ): Promise<void> {
     try {
-      const text = await parseContentToText(source);
+      const text = detectContentType(source) === "raw_text"
+        ? source
+        : await parseContentToText(source);
       const chunks = chunkText(text);
       const contentHash = createHash("sha256").update(text).digest("hex");
 
@@ -262,10 +317,14 @@ class PoCW {
       // Cache content for verify()
       contentCache.set(knowledgeId, { text, chunks });
 
-      markReady(knowledgeId, contentHash, chunks.length);
+      // Extract title/description from text
+      const { title, description } = extractMetadata(source, text);
+      await updateMetadata(knowledgeId, title, description);
+
+      await markReady(knowledgeId, contentHash, chunks.length);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown indexing error";
-      markFailed(knowledgeId, message);
+      await markFailed(knowledgeId, message);
     }
   }
 
@@ -277,7 +336,9 @@ class PoCW {
     if (cached) return cached;
 
     // Re-parse if not cached (e.g., after restart)
-    const text = await parseContentToText(source);
+    const text = detectContentType(source) === "raw_text"
+      ? source
+      : await parseContentToText(source);
     const chunks = chunkText(text);
     contentCache.set(knowledgeId, { text, chunks });
     return { text, chunks };
@@ -287,8 +348,36 @@ class PoCW {
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function computeKnowledgeId(source: string): string {
-  const normalized = source.trim().toLowerCase();
+  const normalized = normalizeSource(source).trim().toLowerCase();
   return createHash("sha256").update(normalized).digest("hex");
+}
+
+/**
+ * Normalize URLs to a canonical form so that equivalent URLs
+ * produce the same knowledgeId (e.g. youtu.be vs youtube.com,
+ * with/without ?si= tracking params).
+ */
+function normalizeSource(source: string): string {
+  try {
+    const url = new URL(source);
+    // YouTube: canonicalize to youtube.com/watch?v=VIDEO_ID
+    if (url.hostname === "youtu.be" || url.hostname === "www.youtu.be") {
+      const videoId = url.pathname.slice(1);
+      if (/^[0-9A-Za-z_-]{11}$/.test(videoId)) {
+        return `https://www.youtube.com/watch?v=${videoId}`;
+      }
+    }
+    if (url.hostname === "youtube.com" || url.hostname === "www.youtube.com") {
+      const params = url.searchParams;
+      const videoId = params.get("v");
+      if (videoId && /^[0-9A-Za-z_-]{11}$/.test(videoId)) {
+        return `https://www.youtube.com/watch?v=${videoId}`;
+      }
+    }
+  } catch {
+    // Not a URL — leave as-is
+  }
+  return source;
 }
 
 function detectContentType(source: string): string {
@@ -299,6 +388,29 @@ function detectContentType(source: string): string {
   } catch {
     return "raw_text";
   }
+}
+
+/**
+ * Extract a human-readable title and description from content.
+ * For YouTube URLs, the video ID is used as title hint.
+ * For raw text, the first non-empty line becomes the title and
+ * the first ~200 chars become the description.
+ */
+function extractMetadata(source: string, text: string): { title: string; description: string } {
+  // Try to extract YouTube video ID as a hint
+  const ytMatch = source.match(/(?:v=|\/)([0-9A-Za-z_-]{11})/);
+  if (ytMatch) {
+    return {
+      title: `YouTube video ${ytMatch[1]}`,
+      description: text.slice(0, 200).trim(),
+    };
+  }
+
+  // For raw text / URLs: use first line as title, first paragraph as description
+  const lines = text.split(/\n+/).map(l => l.trim()).filter(Boolean);
+  const title = lines[0]?.slice(0, 200) || source.slice(0, 100);
+  const description = text.slice(0, 300).trim();
+  return { title, description };
 }
 
 function validateConfig(config?: PoCWConfig): void {

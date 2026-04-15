@@ -108,6 +108,8 @@ export interface ContentRow {
   knowledge_id: string;
   content_type: string;
   source: string;
+  title: string | null;
+  description: string | null;
   status: IndexStatus;
   error: string | null;
   content_id: number | null;
@@ -174,6 +176,14 @@ export interface OnchainAttestation {
   oracle: string;
   controllerAddress: string;
   sbtAddress: string;
+  /** Replay protection: unique bytes32 nonce (0x-prefixed hex) included in the signed payload */
+  nonce: string;
+  /** Replay protection: Unix timestamp (seconds) after which signature is invalid */
+  expiry: number;
+  /** Base64 data URI (data:application/json;base64,...) stored on-chain as the token URI */
+  tokenUri: string;
+  /** SHA-256 hex digest of the metadata JSON */
+  contentHash: string;
 }
 
 export interface OffchainAttestation {
@@ -182,14 +192,41 @@ export interface OffchainAttestation {
   contentId: number;
   score: number;
   oracle: string;
+  /** Replay protection: unique bytes32 nonce (0x-prefixed hex) included in the signed payload */
+  nonce: string;
+  /** Replay protection: Unix timestamp (seconds) after which signature is invalid */
+  expiry: number;
+  /** Base64 data URI (data:application/json;base64,...) stored on-chain as the token URI */
+  tokenUri: string;
+  /** SHA-256 hex digest of the metadata JSON */
+  contentHash: string;
 }
 
 export type AttestationResult = OnchainAttestation | OffchainAttestation;
 
 // ─── Final Result ────────────────────────────────────────────────────────────
 
+export interface PoCWDisclaimers {
+  irtCalibration: string;
+  bloomMapping: string;
+  thresholdSemantics: string;
+}
+
+export const POCW_DISCLAIMERS: PoCWDisclaimers = {
+  irtCalibration:
+    "IRT ability (theta) is estimated from LLM-assigned item difficulties, not empirically " +
+    "calibrated against a population of test-takers. Values are relative, not absolute.",
+  bloomMapping:
+    "Bloom's taxonomy levels are derived from a linear IRT difficulty mapping with " +
+    "arbitrary thresholds. They describe approximate cognitive complexity, not certified task types.",
+  thresholdSemantics:
+    "The competence indicator threshold is a configurable heuristic (default 0.7 = theta ~1.6). " +
+    "It does not correspond to a validated psychometric standard.",
+};
+
 export interface PoCWResult {
-  passed: boolean;
+  /** Heuristic competence indicator. See disclaimers for interpretation guidance. */
+  competenceIndicator: boolean;
   score: number;
   theta: number;
   se: number;
@@ -202,6 +239,10 @@ export interface PoCWResult {
   contentId: number;
   subject: string;
   timestamp: string;
+  /** Base64 data URI of the ERC-1155 metadata (present when attestation type is onchain/offchain) */
+  tokenUri?: string;
+  /** Disclaimer text explaining the heuristic nature of the measurements */
+  disclaimers: PoCWDisclaimers;
 }
 
 // ─── Generation Options (internal, passed to question generator) ─────────────
