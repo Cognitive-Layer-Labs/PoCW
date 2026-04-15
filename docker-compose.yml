@@ -18,5 +18,43 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6380:6379"
+    command: redis-server --save 60 1 --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  oracle:
+    build: ./oracle-service
+    ports:
+      - "3000:3000"
+    depends_on:
+      falkordb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - ORACLE_PRIVATE_KEY=${ORACLE_PRIVATE_KEY}
+      - CORS_ORIGIN=${CORS_ORIGIN:-http://localhost:3001}
+      - FALKORDB_HOST=falkordb
+      - FALKORDB_PORT=6379
+      - REDIS_URL=redis://redis:6379/1
+    volumes:
+      - ./oracle-service/data:/app/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
 volumes:
   falkor_data:
+  redis_data:
