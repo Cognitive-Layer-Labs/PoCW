@@ -17,6 +17,14 @@ type R = Record<string, any>;
 let db: FalkorDB | null = null;
 let graph: Graph | null = null;
 
+/** WS4: When false, all KG operations become no-ops returning degraded results. */
+let falkorAvailable = true;
+
+/** Returns true if FalkorDB is currently connected. */
+export function isFalkorAvailable(): boolean {
+  return falkorAvailable;
+}
+
 /**
  * Initialize the FalkorDB connection and select the graph.
  */
@@ -28,12 +36,48 @@ export async function initFalkorDB(
 ): Promise<void> {
   if (!db) {
     const resolvedPassword = password || process.env.FALKORDB_PASSWORD;
-    db = await FalkorDB.connect({
-      socket: { host, port },
-      ...(resolvedPassword ? { password: resolvedPassword } : {})
-    });
-    graph = db.selectGraph(graphName);
+    try {
+      db = await FalkorDB.connect({
+        socket: { host, port },
+        ...(resolvedPassword ? { password: resolvedPassword } : {})
+      });
+      graph = db.selectGraph(graphName);
+      falkorAvailable = true;
+    } catch (err) {
+      console.warn(
+        "[kg-store] FalkorDB connection failed — KG extraction will be skipped.",
+        err instanceof Error ? err.message : err
+      );
+      falkorAvailable = false;
+      db = null;
+      graph = null;
+      startFalkorReconnect(host, port, resolvedPassword, graphName);
+    }
   }
+}
+
+function startFalkorReconnect(
+  host: string,
+  port: number,
+  password: string | undefined,
+  graphName: string
+): void {
+  const interval = setInterval(async () => {
+    try {
+      const resolvedPassword = password || process.env.FALKORDB_PASSWORD;
+      db = await FalkorDB.connect({
+        socket: { host, port },
+        ...(resolvedPassword ? { password: resolvedPassword } : {})
+      });
+      graph = db.selectGraph(graphName);
+      falkorAvailable = true;
+      clearInterval(interval);
+      console.log("[kg-store] FalkorDB reconnected");
+    } catch {
+      // keep trying
+    }
+  }, 30_000);
+  interval.unref();
 }
 
 /**
@@ -57,12 +101,17 @@ async function getGraph(): Promise<Graph> {
  * Check if a knowledge graph already exists for a given contentId.
  */
 export async function graphExists(contentId: number): Promise<boolean> {
-  const g = await getGraph();
-  const { data } = await g.query<R>(
-    "MATCH (c:Concept {contentId: $contentId}) RETURN count(c) AS cnt",
-    { params: { contentId } }
-  );
-  return ((data ?? [])[0]?.cnt ?? 0) > 0;
+  if (!falkorAvailable) return false;
+  try {
+    const g = await getGraph();
+    const { data } = await g.query<R>(
+      "MATCH (c:Concept {contentId: $contentId}) RETURN count(c) AS cnt",
+      { params: { contentId } }
+    );
+    return ((data ?? [])[0]?.cnt ?? 0) > 0;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -70,6 +119,10 @@ export async function graphExists(contentId: number): Promise<boolean> {
  * Creates :Concept nodes and relationship edges.
  */
 export async function storeGraph(kg: KnowledgeGraph): Promise<void> {
+  if (!falkorAvailable) {
+    console.warn("[kg-store] storeGraph skipped — FalkorDB unavailable");
+    return;
+  }
   const g = await getGraph();
 
   for (const node of kg.nodes) {
@@ -152,9 +205,12 @@ export async function getConceptsByDifficulty(
   contentId: number,
   targetDifficulty: number,
   limit = 3
-): Promise<{ concepts: KGNode[]; subgraph: { nodes: KGNode[]; edges: KGEdge[] } }> {
+): Promise<{ concepts: KGNode[]; subgraph: { nodes: KGNode[]; edges: KGEdge[] }; degraded?: boolean }> {
   if (_getConceptsByDifficultyOverride) {
     return _getConceptsByDifficultyOverride(contentId, targetDifficulty, limit);
+  }
+  if (!falkorAvailable) {
+    return { concepts: [], subgraph: { nodes: [], edges: [] }, degraded: true };
   }
   const targetBloom = difficultyToBloom(targetDifficulty);
   const bloomOrder = ["Remember", "Understand", "Apply", "Analyze", "Evaluate", "Create"];

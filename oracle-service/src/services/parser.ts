@@ -3,67 +3,109 @@ import { JSDOM } from "jsdom";
 
 /**
  * Parse content from a URL into plain text.
- * Supported real parsers:
+ * Supported parsers:
  * - PDF
  * - TXT
+ * - Markdown (.md / .markdown)
  * - HTML
+ * - YouTube transcript (via youtube-transcript package)
  * Transport:
  * - http / https
  * - ipfs
  * - youtube transcript only
+ *
+ * WS6: Errors propagate to the caller — no silent fallbacks.
  */
 export async function parseContentToText(url: string): Promise<string> {
-  try {
-    if (!isValidUrl(url)) {
-      return `Invalid URL: ${url}`;
-    }
-
-    if (isYouTube(url)) {
-      return await parseYouTube(url);
-    }
-
-    if (isIPFS(url)) {
-      url = normalizeIPFS(url);
-    }
-
-    const res = await fetch(url);
-
-    if (!res.ok) {
-      return `Failed to fetch content: ${url}`;
-    }
-
-    const contentType = (res.headers.get("content-type") || "").toLowerCase();
-
-    if (isBinary(contentType)) {
-      return `Unsupported binary content: ${url}`;
-    }
-
-    if (isPDF(contentType, url)) {
-      const buffer = Buffer.from(await res.arrayBuffer());
-      const parsePdf = pdfParse as unknown as (data: Buffer) => Promise<{ text: string }>;
-      const pdf = await parsePdf(buffer);
-      return truncate(cleanText(pdf.text));
-    }
-
-    if (isText(contentType, url)) {
-      const text = await res.text();
-      return truncate(cleanText(text));
-    }
-
-    if (isHTML(contentType, url)) {
-      const html = await res.text();
-      const dom = new JSDOM(html);
-      const text = dom.window.document.body.textContent || "";
-      return truncate(cleanText(text));
-    }
-
-    return `Unsupported content type: ${contentType}`;
-  } catch {
-    return `Content reference: ${url}`;
+  if (!isValidUrl(url)) {
+    throw new Error(`Invalid URL: ${url}`);
   }
+
+  if (isYouTube(url)) {
+    return await parseYouTube(url);
+  }
+
+  if (isIPFS(url)) {
+    url = normalizeIPFS(url);
+  }
+
+  // 3.5 — SSRF protection: block private/internal IP ranges
+  blockPrivateIp(url);
+
+  const res = await fetch(url);
+
+  if (!res.ok) {
+    throw new Error(`Failed to fetch content: ${url} (HTTP ${res.status})`);
+  }
+
+  const contentType = (res.headers.get("content-type") || "").toLowerCase();
+
+  if (isBinary(contentType)) {
+    throw new Error(`Unsupported binary content: ${url}`);
+  }
+
+  if (isPDF(contentType, url)) {
+    const buffer = Buffer.from(await res.arrayBuffer());
+    const parsePdf = pdfParse as unknown as (data: Buffer) => Promise<{ text: string }>;
+    const pdf = await parsePdf(buffer);
+    if (!pdf.text.trim()) {
+      throw new Error("No text found in PDF — it may be image-only");
+    }
+    return truncate(cleanText(pdf.text));
+  }
+
+  if (isMarkdown(contentType, url)) {
+    const text = await res.text();
+    return truncate(text.replace(/\u0000/g, "").trim());
+  }
+
+  if (isText(contentType, url)) {
+    const text = await res.text();
+    return truncate(cleanText(text));
+  }
+
+  if (isHTML(contentType, url)) {
+    const html = await res.text();
+    const dom = new JSDOM(html);
+    const text = dom.window.document.body.textContent || "";
+    return truncate(cleanText(text));
+  }
+
+  throw new Error(`Unsupported content type: ${contentType}`);
 }
 
 /* ================= validation ================= */
+
+/**
+ * 3.5 — SSRF protection.
+ * Throws if the URL resolves to a private/internal IP range.
+ * Only called for http/https URLs (not IPFS, not raw text).
+ */
+function blockPrivateIp(rawUrl: string): void {
+  let hostname: string;
+  try {
+    hostname = new URL(rawUrl).hostname.toLowerCase();
+  } catch {
+    return; // not a parseable URL — other validation will catch it
+  }
+
+  const privateRanges = [
+    /^127\./,               // loopback
+    /^10\./,               // RFC 1918 class A
+    /^172\.(1[6-9]|2\d|3[01])\./, // RFC 1918 class B
+    /^192\.168\./,         // RFC 1918 class C
+    /^169\.254\./,         // link-local / cloud metadata
+    /^::1$/,               // IPv6 loopback
+    /^fc00:/,              // IPv6 unique local
+    /^fe80:/,              // IPv6 link-local
+    /^0\./,                // 0.0.0.0/8
+    /^localhost$/,
+  ];
+
+  if (privateRanges.some(r => r.test(hostname))) {
+    throw new Error(`SSRF blocked: private/internal URL not allowed — ${rawUrl}`);
+  }
+}
 
 function isValidUrl(value: string): boolean {
   try {
@@ -85,6 +127,14 @@ function isPDF(contentType: string, url: string): boolean {
 
 function isText(contentType: string, url: string): boolean {
   return contentType.includes("text/plain") || url.endsWith(".txt");
+}
+
+function isMarkdown(contentType: string, url: string): boolean {
+  return (
+    contentType.includes("text/markdown") ||
+    url.endsWith(".md") ||
+    url.endsWith(".markdown")
+  );
 }
 
 function isHTML(contentType: string, url: string): boolean {
@@ -148,25 +198,32 @@ export function chunkText(text: string, chunkSize = 4000, overlap = 500): string
 
 /* ================= YouTube ================= */
 
+/**
+ * WS6: Use the youtube-transcript package instead of brittle JSDOM scraping.
+ * Throws explicitly when captions are unavailable.
+ */
 async function parseYouTube(url: string): Promise<string> {
+  const videoId = extractYouTubeId(url);
+
   try {
-    const videoId = extractYouTubeId(url);
-    const transcriptUrl =
-      `https://youtubetranscript.com/?server_vid2=${videoId}`;
+    const { YoutubeTranscript } = await import("youtube-transcript");
+    const transcript = await YoutubeTranscript.fetchTranscript(videoId);
 
-    const res = await fetch(transcriptUrl);
-
-    if (!res.ok) {
-      return `YouTube video reference: ${url}`;
+    if (!transcript || transcript.length === 0) {
+      throw new Error(
+        `YouTube transcript unavailable for video ${videoId} — only videos with captions are supported`
+      );
     }
 
-    const html = await res.text();
-    const dom = new JSDOM(html);
-    const text = dom.window.document.body.textContent || "";
-
+    const text = transcript.map((entry: { text: string }) => entry.text).join(" ");
     return truncate(cleanText(text));
-  } catch {
-    return `YouTube video reference: ${url}`;
+  } catch (err) {
+    if (err instanceof Error && err.message.includes("youtube-transcript")) {
+      throw err;
+    }
+    throw new Error(
+      `YouTube transcript unavailable for video ${videoId} — only videos with captions are supported`
+    );
   }
 }
 
