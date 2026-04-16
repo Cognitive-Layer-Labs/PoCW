@@ -3,12 +3,8 @@
 /* eslint-disable */
 import type {
   BaseContract,
-  BigNumberish,
-  BytesLike,
   FunctionFragment,
-  Result,
   Interface,
-  AddressLike,
   ContractRunner,
   ContractMethod,
   Listener,
@@ -18,33 +14,15 @@ import type {
   TypedDeferredTopicFilter,
   TypedEventLog,
   TypedListener,
-  TypedContractMethod,
-} from "../../common";
+} from "../../../common";
 
-export interface IPoCW_SBTInterface extends Interface {
-  getFunction(nameOrSignature: "mint" | "setTokenURI"): FunctionFragment;
+export interface StringsInterface extends Interface {}
 
-  encodeFunctionData(
-    functionFragment: "mint",
-    values: [AddressLike, BigNumberish, BigNumberish]
-  ): string;
-  encodeFunctionData(
-    functionFragment: "setTokenURI",
-    values: [BigNumberish, string]
-  ): string;
-
-  decodeFunctionResult(functionFragment: "mint", data: BytesLike): Result;
-  decodeFunctionResult(
-    functionFragment: "setTokenURI",
-    data: BytesLike
-  ): Result;
-}
-
-export interface IPoCW_SBT extends BaseContract {
-  connect(runner?: ContractRunner | null): IPoCW_SBT;
+export interface Strings extends BaseContract {
+  connect(runner?: ContractRunner | null): Strings;
   waitForDeployment(): Promise<this>;
 
-  interface: IPoCW_SBTInterface;
+  interface: StringsInterface;
 
   queryFilter<TCEvent extends TypedContractEvent>(
     event: TCEvent,
@@ -83,32 +61,9 @@ export interface IPoCW_SBT extends BaseContract {
     event?: TCEvent
   ): Promise<this>;
 
-  mint: TypedContractMethod<
-    [to: AddressLike, id: BigNumberish, amount: BigNumberish],
-    [void],
-    "nonpayable"
-  >;
-
-  setTokenURI: TypedContractMethod<
-    [id: BigNumberish, uri: string],
-    [void],
-    "nonpayable"
-  >;
-
   getFunction<T extends ContractMethod = ContractMethod>(
     key: string | FunctionFragment
   ): T;
-
-  getFunction(
-    nameOrSignature: "mint"
-  ): TypedContractMethod<
-    [to: AddressLike, id: BigNumberish, amount: BigNumberish],
-    [void],
-    "nonpayable"
-  >;
-  getFunction(
-    nameOrSignature: "setTokenURI"
-  ): TypedContractMethod<[id: BigNumberish, uri: string], [void], "nonpayable">;
 
   filters: {};
 }

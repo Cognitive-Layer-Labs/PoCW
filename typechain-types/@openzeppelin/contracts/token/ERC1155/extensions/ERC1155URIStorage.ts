@@ -21,30 +21,24 @@ import type {
   TypedLogDescription,
   TypedListener,
   TypedContractMethod,
-} from "../common";
+} from "../../../../../common";
 
-export interface PoCW_SBTInterface extends Interface {
+export interface ERC1155URIStorageInterface extends Interface {
   getFunction(
     nameOrSignature:
       | "balanceOf"
       | "balanceOfBatch"
       | "isApprovedForAll"
-      | "mint"
-      | "owner"
-      | "renounceOwnership"
       | "safeBatchTransferFrom"
       | "safeTransferFrom"
       | "setApprovalForAll"
-      | "setTokenURI"
       | "supportsInterface"
-      | "transferOwnership"
       | "uri"
   ): FunctionFragment;
 
   getEvent(
     nameOrSignatureOrTopic:
       | "ApprovalForAll"
-      | "OwnershipTransferred"
       | "TransferBatch"
       | "TransferSingle"
       | "URI"
@@ -61,15 +55,6 @@ export interface PoCW_SBTInterface extends Interface {
   encodeFunctionData(
     functionFragment: "isApprovedForAll",
     values: [AddressLike, AddressLike]
-  ): string;
-  encodeFunctionData(
-    functionFragment: "mint",
-    values: [AddressLike, BigNumberish, BigNumberish]
-  ): string;
-  encodeFunctionData(functionFragment: "owner", values?: undefined): string;
-  encodeFunctionData(
-    functionFragment: "renounceOwnership",
-    values?: undefined
   ): string;
   encodeFunctionData(
     functionFragment: "safeBatchTransferFrom",
@@ -90,16 +75,8 @@ export interface PoCW_SBTInterface extends Interface {
     values: [AddressLike, boolean]
   ): string;
   encodeFunctionData(
-    functionFragment: "setTokenURI",
-    values: [BigNumberish, string]
-  ): string;
-  encodeFunctionData(
     functionFragment: "supportsInterface",
     values: [BytesLike]
-  ): string;
-  encodeFunctionData(
-    functionFragment: "transferOwnership",
-    values: [AddressLike]
   ): string;
   encodeFunctionData(functionFragment: "uri", values: [BigNumberish]): string;
 
@@ -110,12 +87,6 @@ export interface PoCW_SBTInterface extends Interface {
   ): Result;
   decodeFunctionResult(
     functionFragment: "isApprovedForAll",
-    data: BytesLike
-  ): Result;
-  decodeFunctionResult(functionFragment: "mint", data: BytesLike): Result;
-  decodeFunctionResult(functionFragment: "owner", data: BytesLike): Result;
-  decodeFunctionResult(
-    functionFragment: "renounceOwnership",
     data: BytesLike
   ): Result;
   decodeFunctionResult(
@@ -131,15 +102,7 @@ export interface PoCW_SBTInterface extends Interface {
     data: BytesLike
   ): Result;
   decodeFunctionResult(
-    functionFragment: "setTokenURI",
-    data: BytesLike
-  ): Result;
-  decodeFunctionResult(
     functionFragment: "supportsInterface",
-    data: BytesLike
-  ): Result;
-  decodeFunctionResult(
-    functionFragment: "transferOwnership",
     data: BytesLike
   ): Result;
   decodeFunctionResult(functionFragment: "uri", data: BytesLike): Result;
@@ -160,19 +123,6 @@ export namespace ApprovalForAllEvent {
     account: string;
     operator: string;
     approved: boolean;
-  }
-  export type Event = TypedContractEvent<InputTuple, OutputTuple, OutputObject>;
-  export type Filter = TypedDeferredTopicFilter<Event>;
-  export type Log = TypedEventLog<Event>;
-  export type LogDescription = TypedLogDescription<Event>;
-}
-
-export namespace OwnershipTransferredEvent {
-  export type InputTuple = [previousOwner: AddressLike, newOwner: AddressLike];
-  export type OutputTuple = [previousOwner: string, newOwner: string];
-  export interface OutputObject {
-    previousOwner: string;
-    newOwner: string;
   }
   export type Event = TypedContractEvent<InputTuple, OutputTuple, OutputObject>;
   export type Filter = TypedDeferredTopicFilter<Event>;
@@ -249,11 +199,11 @@ export namespace URIEvent {
   export type LogDescription = TypedLogDescription<Event>;
 }
 
-export interface PoCW_SBT extends BaseContract {
-  connect(runner?: ContractRunner | null): PoCW_SBT;
+export interface ERC1155URIStorage extends BaseContract {
+  connect(runner?: ContractRunner | null): ERC1155URIStorage;
   waitForDeployment(): Promise<this>;
 
-  interface: PoCW_SBTInterface;
+  interface: ERC1155URIStorageInterface;
 
   queryFilter<TCEvent extends TypedContractEvent>(
     event: TCEvent,
@@ -310,23 +260,13 @@ export interface PoCW_SBT extends BaseContract {
     "view"
   >;
 
-  mint: TypedContractMethod<
-    [to: AddressLike, id: BigNumberish, amount: BigNumberish],
-    [void],
-    "nonpayable"
-  >;
-
-  owner: TypedContractMethod<[], [string], "view">;
-
-  renounceOwnership: TypedContractMethod<[], [void], "nonpayable">;
-
   safeBatchTransferFrom: TypedContractMethod<
     [
-      arg0: AddressLike,
-      arg1: AddressLike,
-      arg2: BigNumberish[],
-      arg3: BigNumberish[],
-      arg4: BytesLike
+      from: AddressLike,
+      to: AddressLike,
+      ids: BigNumberish[],
+      values: BigNumberish[],
+      data: BytesLike
     ],
     [void],
     "nonpayable"
@@ -334,11 +274,11 @@ export interface PoCW_SBT extends BaseContract {
 
   safeTransferFrom: TypedContractMethod<
     [
-      arg0: AddressLike,
-      arg1: AddressLike,
-      arg2: BigNumberish,
-      arg3: BigNumberish,
-      arg4: BytesLike
+      from: AddressLike,
+      to: AddressLike,
+      id: BigNumberish,
+      value: BigNumberish,
+      data: BytesLike
     ],
     [void],
     "nonpayable"
@@ -350,22 +290,10 @@ export interface PoCW_SBT extends BaseContract {
     "nonpayable"
   >;
 
-  setTokenURI: TypedContractMethod<
-    [id: BigNumberish, tokenUri: string],
-    [void],
-    "nonpayable"
-  >;
-
   supportsInterface: TypedContractMethod<
     [interfaceId: BytesLike],
     [boolean],
     "view"
-  >;
-
-  transferOwnership: TypedContractMethod<
-    [newOwner: AddressLike],
-    [void],
-    "nonpayable"
   >;
 
   uri: TypedContractMethod<[tokenId: BigNumberish], [string], "view">;
@@ -396,27 +324,14 @@ export interface PoCW_SBT extends BaseContract {
     "view"
   >;
   getFunction(
-    nameOrSignature: "mint"
-  ): TypedContractMethod<
-    [to: AddressLike, id: BigNumberish, amount: BigNumberish],
-    [void],
-    "nonpayable"
-  >;
-  getFunction(
-    nameOrSignature: "owner"
-  ): TypedContractMethod<[], [string], "view">;
-  getFunction(
-    nameOrSignature: "renounceOwnership"
-  ): TypedContractMethod<[], [void], "nonpayable">;
-  getFunction(
     nameOrSignature: "safeBatchTransferFrom"
   ): TypedContractMethod<
     [
-      arg0: AddressLike,
-      arg1: AddressLike,
-      arg2: BigNumberish[],
-      arg3: BigNumberish[],
-      arg4: BytesLike
+      from: AddressLike,
+      to: AddressLike,
+      ids: BigNumberish[],
+      values: BigNumberish[],
+      data: BytesLike
     ],
     [void],
     "nonpayable"
@@ -425,11 +340,11 @@ export interface PoCW_SBT extends BaseContract {
     nameOrSignature: "safeTransferFrom"
   ): TypedContractMethod<
     [
-      arg0: AddressLike,
-      arg1: AddressLike,
-      arg2: BigNumberish,
-      arg3: BigNumberish,
-      arg4: BytesLike
+      from: AddressLike,
+      to: AddressLike,
+      id: BigNumberish,
+      value: BigNumberish,
+      data: BytesLike
     ],
     [void],
     "nonpayable"
@@ -442,18 +357,8 @@ export interface PoCW_SBT extends BaseContract {
     "nonpayable"
   >;
   getFunction(
-    nameOrSignature: "setTokenURI"
-  ): TypedContractMethod<
-    [id: BigNumberish, tokenUri: string],
-    [void],
-    "nonpayable"
-  >;
-  getFunction(
     nameOrSignature: "supportsInterface"
   ): TypedContractMethod<[interfaceId: BytesLike], [boolean], "view">;
-  getFunction(
-    nameOrSignature: "transferOwnership"
-  ): TypedContractMethod<[newOwner: AddressLike], [void], "nonpayable">;
   getFunction(
     nameOrSignature: "uri"
   ): TypedContractMethod<[tokenId: BigNumberish], [string], "view">;
@@ -464,13 +369,6 @@ export interface PoCW_SBT extends BaseContract {
     ApprovalForAllEvent.InputTuple,
     ApprovalForAllEvent.OutputTuple,
     ApprovalForAllEvent.OutputObject
-  >;
-  getEvent(
-    key: "OwnershipTransferred"
-  ): TypedContractEvent<
-    OwnershipTransferredEvent.InputTuple,
-    OwnershipTransferredEvent.OutputTuple,
-    OwnershipTransferredEvent.OutputObject
   >;
   getEvent(
     key: "TransferBatch"
@@ -504,17 +402,6 @@ export interface PoCW_SBT extends BaseContract {
       ApprovalForAllEvent.InputTuple,
       ApprovalForAllEvent.OutputTuple,
       ApprovalForAllEvent.OutputObject
-    >;
-
-    "OwnershipTransferred(address,address)": TypedContractEvent<
-      OwnershipTransferredEvent.InputTuple,
-      OwnershipTransferredEvent.OutputTuple,
-      OwnershipTransferredEvent.OutputObject
-    >;
-    OwnershipTransferred: TypedContractEvent<
-      OwnershipTransferredEvent.InputTuple,
-      OwnershipTransferredEvent.OutputTuple,
-      OwnershipTransferredEvent.OutputObject
     >;
 
     "TransferBatch(address,address,address,uint256[],uint256[])": TypedContractEvent<

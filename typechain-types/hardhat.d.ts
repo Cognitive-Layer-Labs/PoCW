@@ -34,6 +34,10 @@ declare module "hardhat/types/runtime" {
       signerOrOptions?: ethers.Signer | FactoryOptions
     ): Promise<Contracts.ERC1155__factory>;
     getContractFactory(
+      name: "ERC1155URIStorage",
+      signerOrOptions?: ethers.Signer | FactoryOptions
+    ): Promise<Contracts.ERC1155URIStorage__factory>;
+    getContractFactory(
       name: "IERC1155MetadataURI",
       signerOrOptions?: ethers.Signer | FactoryOptions
     ): Promise<Contracts.IERC1155MetadataURI__factory>;
@@ -61,6 +65,10 @@ declare module "hardhat/types/runtime" {
       name: "SafeCast",
       signerOrOptions?: ethers.Signer | FactoryOptions
     ): Promise<Contracts.SafeCast__factory>;
+    getContractFactory(
+      name: "Strings",
+      signerOrOptions?: ethers.Signer | FactoryOptions
+    ): Promise<Contracts.Strings__factory>;
     getContractFactory(
       name: "IPoCW_SBT",
       signerOrOptions?: ethers.Signer | FactoryOptions
@@ -100,6 +108,11 @@ declare module "hardhat/types/runtime" {
       signer?: ethers.Signer
     ): Promise<Contracts.ERC1155>;
     getContractAt(
+      name: "ERC1155URIStorage",
+      address: string | ethers.Addressable,
+      signer?: ethers.Signer
+    ): Promise<Contracts.ERC1155URIStorage>;
+    getContractAt(
       name: "IERC1155MetadataURI",
       address: string | ethers.Addressable,
       signer?: ethers.Signer
@@ -134,6 +147,11 @@ declare module "hardhat/types/runtime" {
       address: string | ethers.Addressable,
       signer?: ethers.Signer
     ): Promise<Contracts.SafeCast>;
+    getContractAt(
+      name: "Strings",
+      address: string | ethers.Addressable,
+      signer?: ethers.Signer
+    ): Promise<Contracts.Strings>;
     getContractAt(
       name: "IPoCW_SBT",
       address: string | ethers.Addressable,
@@ -171,6 +189,10 @@ declare module "hardhat/types/runtime" {
       signerOrOptions?: ethers.Signer | DeployContractOptions
     ): Promise<Contracts.ERC1155>;
     deployContract(
+      name: "ERC1155URIStorage",
+      signerOrOptions?: ethers.Signer | DeployContractOptions
+    ): Promise<Contracts.ERC1155URIStorage>;
+    deployContract(
       name: "IERC1155MetadataURI",
       signerOrOptions?: ethers.Signer | DeployContractOptions
     ): Promise<Contracts.IERC1155MetadataURI>;
@@ -198,6 +220,10 @@ declare module "hardhat/types/runtime" {
       name: "SafeCast",
       signerOrOptions?: ethers.Signer | DeployContractOptions
     ): Promise<Contracts.SafeCast>;
+    deployContract(
+      name: "Strings",
+      signerOrOptions?: ethers.Signer | DeployContractOptions
+    ): Promise<Contracts.Strings>;
     deployContract(
       name: "IPoCW_SBT",
       signerOrOptions?: ethers.Signer | DeployContractOptions
@@ -237,6 +263,11 @@ declare module "hardhat/types/runtime" {
       signerOrOptions?: ethers.Signer | DeployContractOptions
     ): Promise<Contracts.ERC1155>;
     deployContract(
+      name: "ERC1155URIStorage",
+      args: any[],
+      signerOrOptions?: ethers.Signer | DeployContractOptions
+    ): Promise<Contracts.ERC1155URIStorage>;
+    deployContract(
       name: "IERC1155MetadataURI",
       args: any[],
       signerOrOptions?: ethers.Signer | DeployContractOptions
@@ -271,6 +302,11 @@ declare module "hardhat/types/runtime" {
       args: any[],
       signerOrOptions?: ethers.Signer | DeployContractOptions
     ): Promise<Contracts.SafeCast>;
+    deployContract(
+      name: "Strings",
+      args: any[],
+      signerOrOptions?: ethers.Signer | DeployContractOptions
+    ): Promise<Contracts.Strings>;
     deployContract(
       name: "IPoCW_SBT",
       args: any[],

@@ -16,6 +16,8 @@ export type { IERC721Errors } from "./@openzeppelin/contracts/interfaces/draft-I
 export { IERC721Errors__factory } from "./factories/@openzeppelin/contracts/interfaces/draft-IERC6093.sol/IERC721Errors__factory";
 export type { ERC1155 } from "./@openzeppelin/contracts/token/ERC1155/ERC1155";
 export { ERC1155__factory } from "./factories/@openzeppelin/contracts/token/ERC1155/ERC1155__factory";
+export type { ERC1155URIStorage } from "./@openzeppelin/contracts/token/ERC1155/extensions/ERC1155URIStorage";
+export { ERC1155URIStorage__factory } from "./factories/@openzeppelin/contracts/token/ERC1155/extensions/ERC1155URIStorage__factory";
 export type { IERC1155MetadataURI } from "./@openzeppelin/contracts/token/ERC1155/extensions/IERC1155MetadataURI";
 export { IERC1155MetadataURI__factory } from "./factories/@openzeppelin/contracts/token/ERC1155/extensions/IERC1155MetadataURI__factory";
 export type { IERC1155 } from "./@openzeppelin/contracts/token/ERC1155/IERC1155";
@@ -30,6 +32,8 @@ export type { IERC165 } from "./@openzeppelin/contracts/utils/introspection/IERC
 export { IERC165__factory } from "./factories/@openzeppelin/contracts/utils/introspection/IERC165__factory";
 export type { SafeCast } from "./@openzeppelin/contracts/utils/math/SafeCast";
 export { SafeCast__factory } from "./factories/@openzeppelin/contracts/utils/math/SafeCast__factory";
+export type { Strings } from "./@openzeppelin/contracts/utils/Strings";
+export { Strings__factory } from "./factories/@openzeppelin/contracts/utils/Strings__factory";
 export type { IPoCW_SBT } from "./contracts/PoCW_Controller.sol/IPoCW_SBT";
 export { IPoCW_SBT__factory } from "./factories/contracts/PoCW_Controller.sol/IPoCW_SBT__factory";
 export type { PoCW_Controller } from "./contracts/PoCW_Controller.sol/PoCW_Controller";

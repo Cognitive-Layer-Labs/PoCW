@@ -23,7 +23,12 @@ import type {
 
 export interface PoCW_ControllerInterface extends Interface {
   getFunction(
-    nameOrSignature: "oracleAddress" | "sbtContract" | "verifyAndMint"
+    nameOrSignature:
+      | "oracleAddress"
+      | "sbtContract"
+      | "strictSender"
+      | "usedNonces"
+      | "verifyAndMint"
   ): FunctionFragment;
 
   encodeFunctionData(
@@ -35,8 +40,24 @@ export interface PoCW_ControllerInterface extends Interface {
     values?: undefined
   ): string;
   encodeFunctionData(
+    functionFragment: "strictSender",
+    values?: undefined
+  ): string;
+  encodeFunctionData(
+    functionFragment: "usedNonces",
+    values: [BytesLike]
+  ): string;
+  encodeFunctionData(
     functionFragment: "verifyAndMint",
-    values: [AddressLike, BigNumberish, BigNumberish, BytesLike]
+    values: [
+      AddressLike,
+      BigNumberish,
+      BigNumberish,
+      BigNumberish,
+      BytesLike,
+      string,
+      BytesLike
+    ]
   ): string;
 
   decodeFunctionResult(
@@ -47,6 +68,11 @@ export interface PoCW_ControllerInterface extends Interface {
     functionFragment: "sbtContract",
     data: BytesLike
   ): Result;
+  decodeFunctionResult(
+    functionFragment: "strictSender",
+    data: BytesLike
+  ): Result;
+  decodeFunctionResult(functionFragment: "usedNonces", data: BytesLike): Result;
   decodeFunctionResult(
     functionFragment: "verifyAndMint",
     data: BytesLike
@@ -100,11 +126,18 @@ export interface PoCW_Controller extends BaseContract {
 
   sbtContract: TypedContractMethod<[], [string], "view">;
 
+  strictSender: TypedContractMethod<[], [boolean], "view">;
+
+  usedNonces: TypedContractMethod<[arg0: BytesLike], [boolean], "view">;
+
   verifyAndMint: TypedContractMethod<
     [
       user: AddressLike,
       contentId: BigNumberish,
       score: BigNumberish,
+      expiry: BigNumberish,
+      nonce: BytesLike,
+      tokenUri: string,
       signature: BytesLike
     ],
     [void],
@@ -122,12 +155,21 @@ export interface PoCW_Controller extends BaseContract {
     nameOrSignature: "sbtContract"
   ): TypedContractMethod<[], [string], "view">;
   getFunction(
+    nameOrSignature: "strictSender"
+  ): TypedContractMethod<[], [boolean], "view">;
+  getFunction(
+    nameOrSignature: "usedNonces"
+  ): TypedContractMethod<[arg0: BytesLike], [boolean], "view">;
+  getFunction(
     nameOrSignature: "verifyAndMint"
   ): TypedContractMethod<
     [
       user: AddressLike,
       contentId: BigNumberish,
       score: BigNumberish,
+      expiry: BigNumberish,
+      nonce: BytesLike,
+      tokenUri: string,
       signature: BytesLike
     ],
     [void],

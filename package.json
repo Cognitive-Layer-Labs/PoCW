@@ -8,7 +8,8 @@
     "test": "hardhat test",
     "compile": "hardhat compile",
     "node": "hardhat node",
-    "deploy:local": "hardhat run scripts/deploy.ts --network localhost"
+    "deploy:local": "hardhat run scripts/deploy.ts --network localhost",
+    "deploy:base-sepolia": "hardhat run scripts/deploy.ts --network base-sepolia"
   },
   "repository": {
     "type": "git",
@@ -22,8 +23,13 @@
     "url": "https://github.com/Cognitive-Layer-Labs/PoCW/issues"
   },
   "homepage": "https://github.com/Cognitive-Layer-Labs/PoCW#readme",
+  "overrides": {
+    "serialize-javascript": ">=7.0.5",
+    "bn.js": ">=4.12.3",
+    "cookie": ">=0.7.0"
+  },
   "devDependencies": {
-    "@nomicfoundation/hardhat-toolbox": "6.1.0",
+    "@nomicfoundation/hardhat-toolbox": "6.1.2",
     "@types/chai": "4.3.16",
     "@types/mocha": "10.0.9",
     "@types/node": "20.11.25",
