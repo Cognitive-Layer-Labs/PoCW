@@ -1,153 +1,302 @@
-# Proof of Cognitive Work
+# Proof of Cognitive Work (PoCW)
 
-Adaptive psychometric testing (IRT) + Knowledge Graph + Blockchain credentialing (Soulbound NFTs).
+Adaptive psychometric verification (IRT) + Knowledge Graph extraction + Soulbound credentialing on EVM.
 
-## SDK Quick Start
+## What is in this repo
 
-```ts
-import { PoCW } from "./oracle-service/src/sdk/index";
+- Smart contracts: ERC-1155 SBT + controller verification/mint logic
+- Oracle service: indexing, adaptive questioning, grading, attestation signing
+- Deployment scripts: local and Base Sepolia deployments
+- Docker production backend stack: Oracle + Redis + FalkorDB
 
-const pocw = new PoCW();
-await pocw.init();
+See the protocol/API reference in [docs/API.md](docs/API.md).
 
-// Index any content (URL, IPFS CID, raw text)
-const { knowledgeId } = await pocw.index("https://example.com/article");
-await pocw.waitForIndex(knowledgeId);
+## Quick Start
 
-// Verify knowledge — adaptive questions, IRT scoring
-const result = await pocw.verify(knowledgeId, "0xUserAddress", {
-  max_questions: 5,
-  q_types: ["open", "mcq", "true_false"],
-  threshold: 0.7,
-  onQuestion: async (q) => prompt(q.text),
-});
+### Local Development (single command)
 
-console.log(result.score, result.passed); // 82, true
-await pocw.close();
+```bash
+cp .env.example .env
+# fill required keys in .env
+./start-local.sh
 ```
 
-See [docs/API.md](docs/API.md) for the full protocol reference.
+### Base Sepolia deploy (contracts)
+
+```bash
+npm ci
+npm run deploy:base-sepolia
+```
+
+### Production backend on VPS (docker)
+
+```bash
+docker compose -f docker-compose.vps.yml up -d --build
+```
 
 ## Prerequisites
 
 - Node.js 18+
-- Docker (for FalkorDB + Otterscan)
-- Foundry (for Anvil) — `curl -L https://foundry.paradigm.xyz | bash && foundryup`
-- Hardhat (for tests + deployment scripts)
+- Docker + Docker Compose
+- Foundry (for local Anvil workflow)
+- Nginx + Certbot on VPS host (for HTTPS/domain in production)
 
 ## Environment
 
-Single `.env` file in project root (see `.env.example`):
+All services read from root .env.
 
 ```bash
 cp .env.example .env
-# Fill in your keys
 ```
 
-All env vars are loaded from root `.env` — no separate oracle-service `.env` needed.
+<details>
+<summary><strong>Show Environment Variable Reference</strong></summary>
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `OPENROUTER_API_KEY` | Yes | OpenRouter API key for LLM access |
-| `FALKORDB_HOST` | No | FalkorDB host (default: `localhost`) |
-| `FALKORDB_PORT` | No | FalkorDB port (default: `6379`) |
-| `FALKORDB_PASSWORD` | No | FalkorDB password (if set) |
-| `FALKORDB_GRAPH` | No | FalkorDB graph name (default: `pocw`) |
-| `PORT` | No | Oracle service port (default: `3000`) |
-| `ORACLE_PRIVATE_KEY` | For signing | Oracle wallet private key |
-| `PRIVATE_KEY` | For deploy | Deployer wallet private key |
-| `ORACLE_ADDRESS` | For testnet | Oracle address for testnet deploy |
-| `BASE_SEPOLIA_RPC_URL` | For testnet | Base Sepolia RPC endpoint |
+### Domain and TLS (VPS host)
+
+| Variable | Required | Purpose |
+|---|---|---|
+| ORACLE_DOMAIN | VPS | Oracle domain used in host Nginx/Certbot setup |
+| ACME_EMAIL | VPS | Let’s Encrypt registration email |
+
+### Oracle API behavior
+
+| Variable | Required | Purpose |
+|---|---|---|
+| CORS_ORIGIN | Recommended | Browser origin allowed by Oracle API |
+| POCW_API_KEY | Recommended | Bearer token gate for /api routes |
+| PORT | Optional | Oracle listen port (default 3000) |
+
+### LLM
+
+| Variable | Required | Purpose |
+|---|---|---|
+| OPENROUTER_API_KEY | Yes | OpenRouter key for generation/grading |
+
+### Chain / wallets
+
+| Variable | Required | Purpose |
+|---|---|---|
+| BASE_SEPOLIA_RPC_URL | Base Sepolia deploy | RPC endpoint |
+| PRIVATE_KEY | Base Sepolia deploy | Deployer wallet private key |
+| ORACLE_PRIVATE_KEY | Oracle runtime | Oracle signing wallet key |
+| ORACLE_ADDRESS | Base Sepolia deploy | Oracle signer address registered in controller |
+
+### Data stores
+
+| Variable | Required | Purpose |
+|---|---|---|
+| FALKORDB_HOST | Optional | FalkorDB host (default localhost) |
+| FALKORDB_PORT | Optional | FalkorDB port (default 6379) |
+| FALKORDB_PASSWORD | Optional | Set only if your FalkorDB instance requires auth |
+| FALKORDB_GRAPH | Optional | Graph name (default pocw) |
+| REDIS_PASSWORD | VPS compose | Redis password for docker-compose.vps.yml |
+| REDIS_URL | Optional | Needed if running Oracle directly outside compose |
+
+</details>
 
 ## Local Development
 
-### One-command startup
+<details>
+<summary><strong>Show Manual Local Startup</strong></summary>
 
-```bash
-./start-local.sh
-```
+1. Start infra:
 
-Starts everything in order, skips anything already running, and shuts it all down on `Ctrl+C`.
-
----
-
-### Manual startup (individual services)
-
-Run each in its own terminal, in this order:
-
-**1 — Infra (FalkorDB + Redis)**
 ```bash
 docker compose up falkordb redis
 ```
 
-**2 — Anvil local chain**
+2. Start local chain:
+
 ```bash
-anvil --chain-id 31337              # starts chain at http://127.0.0.1:8545
+anvil --chain-id 31337
 ```
 
-**3 — Deploy contracts** (once per chain restart)
+3. Deploy contracts locally:
+
 ```bash
 npm run deploy:local
 ```
 
-**4 — Oracle service** (hot-reload)
+4. Start Oracle in dev mode:
+
 ```bash
 cd oracle-service
-npm run dev                         # http://localhost:3000
+npm run dev
 ```
 
-**5 — Frontend** (separate repo)
-```bash
-cd ../PoCW-WEB
-npm run dev                         # http://localhost:3001
-```
+5. Optional local explorer (Otterscan):
 
-**6 — Block explorer** (optional)
 ```bash
 docker run -d --name pocw-otterscan -p 5100:80 \
   -e ERIGON_URL="http://localhost:8545" \
   otterscan/otterscan:latest
-# http://localhost:5100
-# docker rm -f pocw-otterscan  # to stop
 ```
 
----
+</details>
 
-### Ports
+## Base Sepolia Contract Deployment
 
-| Service | Port |
-|---|---|
-| Anvil RPC | 8545 |
-| Oracle API | 3000 |
-| Frontend | 3001 |
-| FalkorDB | 6379 |
-| Redis | 6380 |
-| Otterscan | 5100 |
-| FalkorDB UI | 8001 |
+1. Ensure these are set in .env:
 
-### MetaMask local network
+- PRIVATE_KEY
+- ORACLE_ADDRESS
+- BASE_SEPOLIA_RPC_URL
 
-| Field | Value |
-|---|---|
-| RPC URL | `http://127.0.0.1:8545` |
-| Chain ID | `31337` |
-| Deployer key | `0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80` |
-| Oracle key | `0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d` |
+2. Deploy:
 
-> These are well-known Hardhat/Anvil test keys — never use them on a real network.
+```bash
+npm run deploy:base-sepolia
+```
+
+3. Verify output:
+
+```bash
+cat deployments/base-sepolia.json
+```
+
+4. Current deployed record is in [deployments/base-sepolia.json](deployments/base-sepolia.json).
+
+## VPS Hosting (Current Architecture)
+
+Production split:
+
+- Docker compose: oracle + redis + falkordb (backend only)
+- Host Nginx + host Certbot: HTTPS termination + reverse proxy to 127.0.0.1:3000
+
+<details>
+<summary><strong>Show Backend Bring-up Commands (Docker)</strong></summary>
+
+```bash
+docker compose -f docker-compose.vps.yml up -d --build
+docker compose -f docker-compose.vps.yml ps
+curl http://127.0.0.1:3000/health
+```
+
+</details>
+
+<details>
+<summary><strong>Show Nginx Host Config Example</strong></summary>
+
+Create /etc/nginx/conf.d/pocw-oracle.conf:
+
+```nginx
+server {
+    listen 80;
+    listen [::]:80;
+    server_name pocw-oracle.baghici.works;
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+Then:
+
+```bash
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+</details>
+
+<details>
+<summary><strong>Show Certbot (Email-only) Commands</strong></summary>
+
+Issue cert and auto-configure Nginx redirect:
+
+```bash
+sudo certbot --nginx \
+  -d pocw-oracle.baghici.works \
+  -m you@example.com \
+  --agree-tos --no-eff-email --redirect --non-interactive
+```
+
+Verify renewal:
+
+```bash
+sudo certbot renew --dry-run --cert-name pocw-oracle.baghici.works
+```
+
+</details>
+
+<details>
+<summary><strong>Show Final Production Checks</strong></summary>
+
+```bash
+# HTTPS health
+curl https://pocw-oracle.baghici.works/health
+
+# API should reject without bearer token
+curl -i https://pocw-oracle.baghici.works/api/index
+
+# API with token
+curl -H "Authorization: Bearer $POCW_API_KEY" \
+  https://pocw-oracle.baghici.works/api/index
+```
+
+</details>
 
 ## REST API
 
 | Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/index` | POST | Index content `{ source }` |
-| `/api/index/:knowledgeId` | GET | Check indexing status |
-| `/api/verify` | POST | Start verification session `{ knowledgeId, subject, config? }` |
-| `/api/verify/:sessionId/answer` | POST | Submit answer `{ answer }` |
-| `/api/verify/:sessionId/result` | GET | Get final result |
+|---|---|---|
+| /api/upload | POST | Upload file payload (pdf/text) and index it |
+| /api/index | POST | Index source text/url |
+| /api/index | GET | List indexed entries |
+| /api/index/:knowledgeId | GET | Get indexing status |
+| /api/verify | POST | Start verification session |
+| /api/verify/:sessionId/answer | POST | Submit answer |
+| /api/verify/:sessionId/result | GET | Get final result |
+| /health | GET | Liveness endpoint |
 
 ## Tests
 
 ```bash
+npm test
 cd oracle-service && npm test
 ```
+
+## Troubleshooting
+
+<details>
+<summary><strong>Deployment nonce errors (Base Sepolia)</strong></summary>
+
+- If you see nonce mismatch errors, retry deployment from the same deployer key.
+- The deploy script includes nonce retry logic and writes deployment output when successful.
+
+</details>
+
+<details>
+<summary><strong>Oracle starts but cannot index with KG</strong></summary>
+
+- Check backend status:
+
+```bash
+docker compose -f docker-compose.vps.yml ps
+docker compose -f docker-compose.vps.yml logs oracle --tail=200
+```
+
+- Verify Redis password in .env matches compose REDIS_PASSWORD.
+- Ensure Oracle can reach FalkorDB on service name falkordb:6379.
+
+</details>
+
+<details>
+<summary><strong>HTTPS cert renew issues</strong></summary>
+
+- Ensure DNS A record points to this VPS public IP.
+- Ensure port 80 is reachable externally during renewal challenge.
+- Run targeted dry-run:
+
+```bash
+sudo certbot renew --dry-run --cert-name pocw-oracle.baghici.works
+```
+
+</details>
