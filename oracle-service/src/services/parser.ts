@@ -206,8 +206,13 @@ async function parseYouTube(url: string): Promise<string> {
   const videoId = extractYouTubeId(url);
 
   try {
-    const { YoutubeTranscript } = await import("youtube-transcript");
-    const transcript = await YoutubeTranscript.fetchTranscript(videoId);
+    // TypeScript transpiles `import()` to `require()` in CommonJS mode.
+    // This native loader keeps real ESM import semantics at runtime.
+    const dynamicImport = new Function("specifier", "return import(specifier)") as
+      (specifier: string) => Promise<{ YoutubeTranscript?: { fetchTranscript: (id: string) => Promise<Array<{ text: string }>> } }>;
+    const { YoutubeTranscript } = await dynamicImport("youtube-transcript");
+
+    const transcript = await YoutubeTranscript?.fetchTranscript(videoId);
 
     if (!transcript || transcript.length === 0) {
       throw new Error(
@@ -218,12 +223,44 @@ async function parseYouTube(url: string): Promise<string> {
     const text = transcript.map((entry: { text: string }) => entry.text).join(" ");
     return truncate(cleanText(text));
   } catch (err) {
-    if (err instanceof Error && err.message.includes("youtube-transcript")) {
-      throw err;
+    // Fallback: scrape transcript mirror when youtube-transcript module fails in some runtimes.
+    const fallbackText = await fetchTranscriptViaMirror(videoId);
+    if (fallbackText) {
+      return fallbackText;
     }
+
+    // Preserve useful debug context from module/runtime failures.
+    if (err instanceof Error && (
+      err.message.includes("youtube-transcript") ||
+      err.message.includes("exports is not defined") ||
+      err.message.includes("ES module scope")
+    )) {
+      throw new Error(
+        `YouTube transcript module error for ${videoId}: ${err.message}`
+      );
+    }
+
     throw new Error(
       `YouTube transcript unavailable for video ${videoId} — only videos with captions are supported`
     );
+  }
+}
+
+async function fetchTranscriptViaMirror(videoId: string): Promise<string | null> {
+  try {
+    const transcriptUrl = `https://youtubetranscript.com/?server_vid2=${videoId}`;
+    const res = await fetch(transcriptUrl);
+    if (!res.ok) {
+      return null;
+    }
+
+    const html = await res.text();
+    const dom = new JSDOM(html);
+    const text = dom.window.document.body.textContent || "";
+    const cleaned = truncate(cleanText(text));
+    return cleaned.length > 0 ? cleaned : null;
+  } catch {
+    return null;
   }
 }
 
