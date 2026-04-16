@@ -8,7 +8,7 @@ import { JSDOM } from "jsdom";
  * - TXT
  * - Markdown (.md / .markdown)
  * - HTML
- * - YouTube transcript (via youtube-transcript package)
+ * - YouTube transcript (HTTP transcript sources)
  * Transport:
  * - http / https
  * - ipfs
@@ -199,51 +199,27 @@ export function chunkText(text: string, chunkSize = 4000, overlap = 500): string
 /* ================= YouTube ================= */
 
 /**
- * WS6: Use the youtube-transcript package instead of brittle JSDOM scraping.
+ * Parse YouTube captions without loading ESM/CJS-dependent libraries at runtime.
  * Throws explicitly when captions are unavailable.
  */
 async function parseYouTube(url: string): Promise<string> {
   const videoId = extractYouTubeId(url);
 
-  try {
-    // TypeScript transpiles `import()` to `require()` in CommonJS mode.
-    // This native loader keeps real ESM import semantics at runtime.
-    const dynamicImport = new Function("specifier", "return import(specifier)") as
-      (specifier: string) => Promise<{ YoutubeTranscript?: { fetchTranscript: (id: string) => Promise<Array<{ text: string }>> } }>;
-    const { YoutubeTranscript } = await dynamicImport("youtube-transcript");
-
-    const transcript = await YoutubeTranscript?.fetchTranscript(videoId);
-
-    if (!transcript || transcript.length === 0) {
-      throw new Error(
-        `YouTube transcript unavailable for video ${videoId} — only videos with captions are supported`
-      );
-    }
-
-    const text = transcript.map((entry: { text: string }) => entry.text).join(" ");
-    return truncate(cleanText(text));
-  } catch (err) {
-    // Fallback: scrape transcript mirror when youtube-transcript module fails in some runtimes.
-    const fallbackText = await fetchTranscriptViaMirror(videoId);
-    if (fallbackText) {
-      return fallbackText;
-    }
-
-    // Preserve useful debug context from module/runtime failures.
-    if (err instanceof Error && (
-      err.message.includes("youtube-transcript") ||
-      err.message.includes("exports is not defined") ||
-      err.message.includes("ES module scope")
-    )) {
-      throw new Error(
-        `YouTube transcript module error for ${videoId}: ${err.message}`
-      );
-    }
-
-    throw new Error(
-      `YouTube transcript unavailable for video ${videoId} — only videos with captions are supported`
-    );
+  // Fast path used in tests and many production cases.
+  const mirrorText = await fetchTranscriptViaMirror(videoId);
+  if (mirrorText) {
+    return mirrorText;
   }
+
+  // Fallback to YouTube timedtext API if the mirror is unavailable.
+  const timedText = await fetchTranscriptViaYouTubeTimedText(videoId);
+  if (timedText) {
+    return timedText;
+  }
+
+  throw new Error(
+    `YouTube transcript unavailable for video ${videoId} — only videos with captions are supported`
+  );
 }
 
 async function fetchTranscriptViaMirror(videoId: string): Promise<string | null> {
@@ -259,6 +235,56 @@ async function fetchTranscriptViaMirror(videoId: string): Promise<string | null>
     const text = dom.window.document.body.textContent || "";
     const cleaned = truncate(cleanText(text));
     return cleaned.length > 0 ? cleaned : null;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchTranscriptViaYouTubeTimedText(videoId: string): Promise<string | null> {
+  try {
+    const listUrl = `https://video.google.com/timedtext?type=list&v=${videoId}`;
+    const listRes = await fetch(listUrl);
+    if (!listRes.ok) {
+      return null;
+    }
+
+    const listXml = await listRes.text();
+    const listDom = new JSDOM(listXml, { contentType: "text/xml" });
+    const trackEls = Array.from(listDom.window.document.querySelectorAll("track"));
+
+    if (trackEls.length === 0) {
+      return null;
+    }
+
+    const preferred = trackEls.find(t => t.getAttribute("lang_code") === "en") || trackEls[0];
+    const lang = preferred.getAttribute("lang_code");
+    if (!lang) {
+      return null;
+    }
+
+    const name = preferred.getAttribute("name") || "";
+    const params = new URLSearchParams({ v: videoId, lang, fmt: "srv3" });
+    if (name) {
+      params.set("name", name);
+    }
+
+    const transcriptUrl = `https://video.google.com/timedtext?${params.toString()}`;
+    const transcriptRes = await fetch(transcriptUrl);
+    if (!transcriptRes.ok) {
+      return null;
+    }
+
+    const transcriptXml = await transcriptRes.text();
+    const transcriptDom = new JSDOM(transcriptXml, { contentType: "text/xml" });
+    const chunks = Array.from(transcriptDom.window.document.querySelectorAll("text"))
+      .map(node => (node.textContent || "").replace(/\n/g, " ").trim())
+      .filter(Boolean);
+
+    if (chunks.length === 0) {
+      return null;
+    }
+
+    return truncate(cleanText(chunks.join(" ")));
   } catch {
     return null;
   }
