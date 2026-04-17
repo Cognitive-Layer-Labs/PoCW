@@ -205,6 +205,13 @@ export function chunkText(text: string, chunkSize = 4000, overlap = 500): string
 async function parseYouTube(url: string): Promise<string> {
   const videoId = extractYouTubeId(url);
 
+  // First try the dedicated transcript library via explicit ESM entrypoint.
+  // The package's default entry can break in CJS runtimes due packaging metadata.
+  const packageText = await fetchTranscriptViaYoutubeTranscriptEsm(videoId);
+  if (packageText) {
+    return packageText;
+  }
+
   // Fast path used in tests and many production cases.
   const mirrorText = await fetchTranscriptViaMirror(videoId);
   if (mirrorText) {
@@ -220,6 +227,57 @@ async function parseYouTube(url: string): Promise<string> {
   throw new Error(
     `YouTube transcript unavailable for video ${videoId} — only videos with captions are supported`
   );
+}
+
+type YoutubeTranscriptRow = {
+  text?: string;
+};
+
+type YoutubeTranscriptModule = {
+  YoutubeTranscript?: {
+    fetchTranscript: (videoId: string) => Promise<YoutubeTranscriptRow[]>;
+  };
+};
+
+const dynamicImport = new Function(
+  "specifier",
+  "return import(specifier)"
+) as (specifier: string) => Promise<unknown>;
+
+async function fetchTranscriptViaYoutubeTranscriptEsm(videoId: string): Promise<string | null> {
+  if (process.env.POCW_SKIP_YT_PKG_FALLBACK === "1") {
+    return null;
+  }
+
+  try {
+    const mod = (await dynamicImport(
+      "youtube-transcript/dist/youtube-transcript.esm.js"
+    )) as YoutubeTranscriptModule;
+
+    const fetchTranscript = mod?.YoutubeTranscript?.fetchTranscript;
+    if (typeof fetchTranscript !== "function") {
+      return null;
+    }
+
+    const rows = await fetchTranscript(videoId);
+    if (!Array.isArray(rows) || rows.length === 0) {
+      return null;
+    }
+
+    const candidate = cleanText(
+      rows
+        .map((row) => (typeof row?.text === "string" ? row.text : ""))
+        .join(" ")
+    );
+
+    if (!candidate || isBlockedTranscriptPayload(candidate)) {
+      return null;
+    }
+
+    return truncate(candidate);
+  } catch {
+    return null;
+  }
 }
 
 const YOUTUBE_BLOCK_PATTERNS: RegExp[] = [
