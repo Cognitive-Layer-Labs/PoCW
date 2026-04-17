@@ -222,6 +222,24 @@ async function parseYouTube(url: string): Promise<string> {
   );
 }
 
+const YOUTUBE_BLOCK_PATTERNS: RegExp[] = [
+  /youtube\s+is\s+currently\s+blocking\s+us\s+from\s+fetching\s+subtitles/i,
+  /preventing\s+us\s+from\s+generating\s+a\s+summary/i,
+  /we'?re\s+working\s+on\s+a\s+fix/i,
+  /video\s+unavailable/i,
+  /sign\s+in\s+to\s+confirm\s+your\s+age/i,
+  /this\s+video\s+is\s+private/i,
+  /captions\s+are\s+not\s+available/i,
+];
+
+function isBlockedTranscriptPayload(text: string): boolean {
+  const normalized = cleanText(text);
+  if (!normalized) {
+    return true;
+  }
+  return YOUTUBE_BLOCK_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
 async function fetchTranscriptViaMirror(videoId: string): Promise<string | null> {
   try {
     const transcriptUrl = `https://youtubetranscript.com/?server_vid2=${videoId}`;
@@ -230,10 +248,27 @@ async function fetchTranscriptViaMirror(videoId: string): Promise<string | null>
       return null;
     }
 
-    const html = await res.text();
-    const dom = new JSDOM(html);
-    const text = dom.window.document.body.textContent || "";
-    const cleaned = truncate(cleanText(text));
+    const raw = await res.text();
+
+    // Most mirror responses are XML transcripts. Prefer explicit <text> nodes.
+    const xmlDom = new JSDOM(raw, { contentType: "text/xml" });
+    const xmlChunks = Array.from(xmlDom.window.document.querySelectorAll("text"))
+      .map((node) => (node.textContent || "").replace(/\n/g, " ").trim())
+      .filter(Boolean);
+
+    let candidate = "";
+    if (xmlChunks.length > 0) {
+      candidate = cleanText(xmlChunks.join(" "));
+    } else {
+      const htmlDom = new JSDOM(raw);
+      candidate = cleanText(htmlDom.window.document.body.textContent || "");
+    }
+
+    if (isBlockedTranscriptPayload(candidate)) {
+      return null;
+    }
+
+    const cleaned = truncate(candidate);
     return cleaned.length > 0 ? cleaned : null;
   } catch {
     return null;
@@ -284,7 +319,12 @@ async function fetchTranscriptViaYouTubeTimedText(videoId: string): Promise<stri
       return null;
     }
 
-    return truncate(cleanText(chunks.join(" ")));
+    const candidate = cleanText(chunks.join(" "));
+    if (isBlockedTranscriptPayload(candidate)) {
+      return null;
+    }
+
+    return truncate(candidate);
   } catch {
     return null;
   }
