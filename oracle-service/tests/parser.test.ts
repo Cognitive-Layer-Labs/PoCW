@@ -90,6 +90,47 @@ describe("parseContentToText", function () {
     expect(text).to.contain("transcript");
   });
 
+  it("parses YouTube transcript via InnerTube captionTracks fallback", async () => {
+    const oldSkip = process.env.POCW_SKIP_YT_INNERTUBE_FALLBACK;
+    process.env.POCW_SKIP_YT_INNERTUBE_FALLBACK = "0";
+
+    nock("https://www.youtube.com")
+      .post("/youtubei/v1/player")
+      .query({ prettyPrint: "false" })
+      .reply(200, {
+        captions: {
+          playerCaptionsTracklistRenderer: {
+            captionTracks: [
+              {
+                baseUrl: "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=en&kind=asr",
+                languageCode: "en",
+                kind: "asr",
+              },
+            ],
+          },
+        },
+      });
+
+    nock("https://www.youtube.com")
+      .get("/api/timedtext")
+      .query(true)
+      .reply(
+        200,
+        "<?xml version=\"1.0\" encoding=\"utf-8\" ?><timedtext format=\"3\"><body><p t=\"0\" d=\"1000\"><s>Hello</s><s>world</s></p><p t=\"1000\" d=\"1000\"><s>from</s><s>InnerTube</s></p></body></timedtext>",
+        { "Content-Type": "application/xml" }
+      );
+
+    try {
+      const text = await parseContentToText(
+        "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+      );
+
+      expect(text).to.contain("Hello world from InnerTube");
+    } finally {
+      process.env.POCW_SKIP_YT_INNERTUBE_FALLBACK = oldSkip;
+    }
+  });
+
   it("ignores blocked mirror payload and throws when no captions are available", async () => {
     nock("https://youtubetranscript.com")
       .get(/.*/)

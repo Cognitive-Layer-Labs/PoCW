@@ -205,6 +205,12 @@ export function chunkText(text: string, chunkSize = 4000, overlap = 500): string
 async function parseYouTube(url: string): Promise<string> {
   const videoId = extractYouTubeId(url);
 
+  // Most reliable server-side path: InnerTube captionTracks.
+  const innerTubeText = await fetchTranscriptViaInnerTube(videoId);
+  if (innerTubeText) {
+    return innerTubeText;
+  }
+
   // First try the dedicated transcript library via explicit ESM entrypoint.
   // The package's default entry can break in CJS runtimes due packaging metadata.
   const packageText = await fetchTranscriptViaYoutubeTranscriptEsm(videoId);
@@ -233,6 +239,20 @@ type YoutubeTranscriptRow = {
   text?: string;
 };
 
+type CaptionTrack = {
+  baseUrl?: string;
+  languageCode?: string;
+  kind?: string;
+};
+
+type InnerTubeResponse = {
+  captions?: {
+    playerCaptionsTracklistRenderer?: {
+      captionTracks?: CaptionTrack[];
+    };
+  };
+};
+
 type YoutubeTranscriptModule = {
   YoutubeTranscript?: {
     fetchTranscript: (videoId: string) => Promise<YoutubeTranscriptRow[]>;
@@ -243,6 +263,131 @@ const dynamicImport = new Function(
   "specifier",
   "return import(specifier)"
 ) as (specifier: string) => Promise<unknown>;
+
+const YOUTUBE_ANDROID_CLIENT_VERSION = "20.10.38";
+const YOUTUBE_ANDROID_UA =
+  `com.google.android.youtube/${YOUTUBE_ANDROID_CLIENT_VERSION} (Linux; U; Android 14)`;
+const YOUTUBE_BROWSER_UA =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_4) " +
+  "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/85.0.4183.83 Safari/537.36,gzip(gfe)";
+
+function selectCaptionTrack(tracks: CaptionTrack[]): CaptionTrack | null {
+  if (tracks.length === 0) return null;
+
+  return (
+    tracks.find((track) => track.languageCode === "en" && track.kind !== "asr") ||
+    tracks.find((track) => track.languageCode === "en") ||
+    tracks.find((track) => track.kind !== "asr") ||
+    tracks[0]
+  );
+}
+
+function parseYouTubeTranscriptXml(xml: string): string | null {
+  const dom = new JSDOM(xml, { contentType: "text/xml" });
+
+  // Legacy timedtext format.
+  const textNodes = Array.from(dom.window.document.querySelectorAll("text"))
+    .map((node) => (node.textContent || "").replace(/\n/g, " ").trim())
+    .filter(Boolean);
+
+  if (textNodes.length > 0) {
+    const candidate = cleanText(textNodes.join(" "));
+    if (!candidate || isBlockedTranscriptPayload(candidate)) {
+      return null;
+    }
+    return truncate(candidate);
+  }
+
+  // Timedtext format=3 uses <p><s>...</s></p> segments.
+  const paragraphNodes = Array.from(dom.window.document.querySelectorAll("p"));
+  if (paragraphNodes.length === 0) {
+    return null;
+  }
+
+  const chunks = paragraphNodes
+    .map((paragraph) => {
+      const spanChunks = Array.from(paragraph.querySelectorAll("s"))
+        .map((span) => (span.textContent || "").replace(/\n/g, " ").trim())
+        .filter(Boolean);
+
+      if (spanChunks.length > 0) {
+        return spanChunks.join(" ");
+      }
+
+      return (paragraph.textContent || "").replace(/\n/g, " ").trim();
+    })
+    .filter(Boolean);
+
+  if (chunks.length === 0) {
+    return null;
+  }
+
+  const candidate = cleanText(chunks.join(" "));
+  if (!candidate || isBlockedTranscriptPayload(candidate)) {
+    return null;
+  }
+
+  return truncate(candidate);
+}
+
+async function fetchTranscriptViaInnerTube(videoId: string): Promise<string | null> {
+  if (process.env.POCW_SKIP_YT_INNERTUBE_FALLBACK === "1") {
+    return null;
+  }
+
+  try {
+    const response = await fetch(
+      "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "User-Agent": YOUTUBE_ANDROID_UA,
+        },
+        body: JSON.stringify({
+          context: {
+            client: {
+              clientName: "ANDROID",
+              clientVersion: YOUTUBE_ANDROID_CLIENT_VERSION,
+            },
+          },
+          videoId,
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const data = (await response.json()) as InnerTubeResponse;
+    const tracks = data?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+    if (!Array.isArray(tracks) || tracks.length === 0) {
+      return null;
+    }
+
+    const selectedTrack = selectCaptionTrack(tracks);
+    const baseUrl = selectedTrack?.baseUrl;
+    if (!baseUrl) {
+      return null;
+    }
+
+    const transcriptResponse = await fetch(baseUrl, {
+      headers: {
+        "User-Agent": YOUTUBE_BROWSER_UA,
+      },
+    });
+
+    if (!transcriptResponse.ok) {
+      return null;
+    }
+
+    const transcriptXml = await transcriptResponse.text();
+    return parseYouTubeTranscriptXml(transcriptXml);
+  } catch {
+    return null;
+  }
+}
 
 async function fetchTranscriptViaYoutubeTranscriptEsm(videoId: string): Promise<string | null> {
   if (process.env.POCW_SKIP_YT_PKG_FALLBACK === "1") {

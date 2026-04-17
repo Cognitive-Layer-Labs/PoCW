@@ -6,3 +6,4 @@ if (!process.env.ORACLE_PRIVATE_KEY) {
 
 // Keep parser tests deterministic by forcing HTTP-only YouTube fallbacks in tests.
 process.env.POCW_SKIP_YT_PKG_FALLBACK = "1";
+process.env.POCW_SKIP_YT_INNERTUBE_FALLBACK = "1";
