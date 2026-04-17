@@ -17,8 +17,9 @@ import { JSDOM } from "jsdom";
  * WS6: Errors propagate to the caller — no silent fallbacks.
  */
 export async function parseContentToText(url: string): Promise<string> {
-  if (!isValidUrl(url)) {
-    throw new Error(`Invalid URL: ${url}`);
+  const validationError = validateSourceUrl(url);
+  if (validationError) {
+    throw new Error(validationError);
   }
 
   if (isYouTube(url)) {
@@ -107,16 +108,36 @@ function blockPrivateIp(rawUrl: string): void {
   }
 }
 
-function isValidUrl(value: string): boolean {
-  try {
-    if (value.startsWith("ipfs://")) {
-      return value.length > 7;
-    }
-    new URL(value);
-    return true;
-  } catch {
-    return false;
+function validateSourceUrl(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return `Invalid URL: ${value}`;
   }
+
+  if (trimmed.startsWith("ipfs://")) {
+    const remainder = trimmed.slice("ipfs://".length).trim();
+    if (!remainder || remainder.startsWith("/") || /\s/.test(remainder)) {
+      return "Invalid IPFS URL. Use ipfs://<CID>[/path]";
+    }
+    return null;
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return `Invalid URL: ${value}`;
+  }
+
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return `Unsupported URL protocol: ${parsed.protocol}. Use http://, https://, or ipfs://`;
+  }
+
+  if (!parsed.hostname) {
+    return `Invalid URL: ${value}`;
+  }
+
+  return null;
 }
 
 /* ================= type detection ================= */

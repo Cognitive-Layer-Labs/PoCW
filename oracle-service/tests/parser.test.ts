@@ -162,6 +162,20 @@ describe("parseContentToText", function () {
     );
   });
 
+  it("rejects unsupported ws protocol", async () => {
+    await expectErrorMessage(
+      () => parseContentToText("ws://example.com/socket"),
+      /unsupported url protocol/i
+    );
+  });
+
+  it("rejects malformed IPFS URL", async () => {
+    await expectErrorMessage(
+      () => parseContentToText("ipfs://"),
+      /invalid ipfs url/i
+    );
+  });
+
   it("handles 404 error", async () => {
     nock("https://example.com")
       .get("/missing.txt")

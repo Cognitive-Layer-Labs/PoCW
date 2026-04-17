@@ -70,6 +70,39 @@ export async function initAppServices(): Promise<void> {
 }
 
 const MAX_ANSWER_LENGTH = 50_000;
+const SUPPORTED_SOURCE_PROTOCOLS = new Set(["http:", "https:", "ipfs:"]);
+
+function validateIndexSourceUrl(source: string): string | null {
+  const value = source.trim();
+  if (!value) {
+    return "source is required";
+  }
+
+  if (value.startsWith("ipfs://")) {
+    const remainder = value.slice("ipfs://".length).trim();
+    if (!remainder || remainder.startsWith("/") || /\s/.test(remainder)) {
+      return "Invalid source URL. Use ipfs://<CID>[/path]";
+    }
+    return null;
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return "Invalid source URL. Use http://, https://, or ipfs://";
+  }
+
+  if (!SUPPORTED_SOURCE_PROTOCOLS.has(parsed.protocol)) {
+    return `Unsupported source URL protocol \"${parsed.protocol}\". Use http://, https://, or ipfs://`;
+  }
+
+  if (!parsed.hostname) {
+    return "Invalid source URL. Hostname is required";
+  }
+
+  return null;
+}
 
 // ─── Error Mapping ───────────────────────────────────────────────────────────
 
@@ -151,6 +184,11 @@ app.post("/api/index", async (req: Request, res: Response) => {
   const { source } = req.body || {};
   if (!source || typeof source !== "string") {
     return res.status(400).json({ error: "source is required", code: "INVALID_CONFIG" });
+  }
+
+  const validationError = validateIndexSourceUrl(source);
+  if (validationError) {
+    return res.status(400).json({ error: validationError, code: "INVALID_CONFIG" });
   }
 
   try {
