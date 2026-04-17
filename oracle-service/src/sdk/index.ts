@@ -136,6 +136,20 @@ class PoCW {
     // Check if already indexed
     const existing = getContent(knowledgeId);
     if (existing) {
+      // Failed entries should be retried to avoid permanently caching transient parser/runtime errors.
+      if (existing.status === "failed") {
+        const retrySource = existing.source || source;
+        const retryContentId = existing.content_id ?? numericId;
+
+        await markIndexing(knowledgeId);
+
+        const job = this.runIndexing(knowledgeId, retrySource, retryContentId);
+        indexingJobs.set(knowledgeId, job);
+        job.finally(() => indexingJobs.delete(knowledgeId));
+
+        return { knowledgeId, status: "indexing", contentId: retryContentId };
+      }
+
       return {
         knowledgeId,
         status: existing.status as IndexResult["status"],

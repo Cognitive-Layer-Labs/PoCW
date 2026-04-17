@@ -117,7 +117,7 @@ export async function insertContent(
 export async function markIndexing(knowledgeId: string): Promise<void> {
   return runSerialized(() => {
     getDb()
-      .prepare("UPDATE content_index SET status = 'indexing' WHERE knowledge_id = ?")
+      .prepare("UPDATE content_index SET status = 'indexing', error = NULL WHERE knowledge_id = ?")
       .run(knowledgeId);
   });
 }
