@@ -4,7 +4,7 @@
 
 // ─── Question Types ──────────────────────────────────────────────────────────
 
-export type QuestionType = "open" | "mcq" | "true_false" | "scenario";
+export type QuestionType = "open" | "mcq" | "true_false";
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
@@ -44,7 +44,7 @@ export const DEFAULT_CONFIG: Required<
 > = {
   max_questions: 10,
   difficulty: 0.5,
-  q_types: ["open"],
+  q_types: ["open", "mcq", "true_false"],
   threshold: 0.7,
   response: "score",
   attest: "none",
@@ -141,11 +141,22 @@ export interface AnswerFeedback {
   score: number;
   reasoning: string;
   dimensions?: {
-    accuracy: number;
-    depth: number;
-    specificity: number;
-    reasoning: number;
+    covered_points: number;
+    total_points: number;
+    precision_cap: number;
   };
+  /** IRT parameters used for this item and the resulting ability shift. */
+  irtParams?: {
+    a: number;
+    b_llm: number;
+    b_pred: number | null;
+    b_used: number;
+    c: number;
+    d: number;
+    theta_before: number;
+  };
+  /** Reference key points for open questions (from question generation). */
+  referenceKeyPoints?: string[];
   progress: {
     questionNumber: number;
     theta: number;

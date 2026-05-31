@@ -9,11 +9,22 @@ import { randomUUID } from "crypto";
 import {
   createIRTState,
   updateAbility,
-  selectNextDifficulty,
+  selectNextQuestion,
+  isConceptMasteryComplete,
   thetaToScore,
   difficultyToBloom,
+  isAberrant,
+  questionTypeC,
   IRTState,
+  IRTResponse,
+  ConceptMastery,
+  ConceptMasteryMap,
+  BloomCoverage,
+  IMPORTANT_CONCEPT_THRESHOLD,
+  MIN_IMPORTANT_CONCEPTS,
+  BLOOM_WEIGHTS,
 } from "../services/irt-engine";
+import { getImportantConcepts } from "../services/kg-store";
 import {
   generateQuestion,
   gradeAnswer,
@@ -29,6 +40,7 @@ import {
   CognitiveProfile,
 } from "../services/metadata-store";
 import { buildAttestation } from "./attestation";
+import { predictIRTParams } from "../services/predictor-client";
 import { getOracleAddress } from "../services/signer";
 import { getContent } from "./content-store";
 import {
@@ -56,7 +68,7 @@ interface QuestionEntry {
   reasoning?: string;
 }
 
-/** Snapshot shape for Redis persistence (WS3). */
+/** Snapshot shape for Redis persistence. */
 export interface SessionSnapshot {
   sessionId: string;
   createdAt: number;
@@ -65,7 +77,10 @@ export interface SessionSnapshot {
   subject: string;
   config: ResolvedConfig;
   chunkUsageCount: number[];
-  irtState: { theta: number; se: number; converged: boolean; responses: Array<{ difficulty: number; correct: boolean; score: number; bloomLevel: string }> };
+  bloomCoverage: BloomCoverage;
+  conceptMastery: Array<[string, ConceptMastery]>;
+  currentTarget: { conceptId: string | null; edgeDirection: 'direct' | 'incoming' | 'outgoing' };
+  irtState: { theta: number; se: number; converged: boolean; responses: IRTResponse[] };
   questionHistory: Array<{
     question: string; type: QuestionType; difficulty: number; bloomLevel: string;
     targetConcept: string; userAnswer?: string; score?: number; correct?: boolean; reasoning?: string;
@@ -73,6 +88,7 @@ export interface SessionSnapshot {
   currentQuestion: {
     question: string; targetConcept: string; bloomLevel: string; difficulty: number;
     type: QuestionType; options?: string[]; correctAnswer?: string;
+    referenceKeyPoints?: string[]; conceptContext?: string;
   } | null;
   currentChunkIndex: number;
   targetDifficulties: number[];
@@ -93,10 +109,13 @@ export class VerifySession {
   private readonly opts: GenerationOpts;
 
   private irtState: IRTState;
+  private conceptMastery: ConceptMasteryMap = new Map();
+  private bloomCoverage: BloomCoverage = {}; // kept for snapshot compat
   private questionHistory: QuestionEntry[] = [];
   private _currentQuestion: GeneratedQuestion | null = null;
   private _currentChunkIndex: number = 0;
   private targetDifficulties: number[] = [];
+  private _currentTarget: { conceptId: string | null; edgeDirection: 'direct' | 'incoming' | 'outgoing' } = { conceptId: null, edgeDirection: 'direct' };
   private _complete: boolean = false;
 
   constructor(
@@ -123,20 +142,54 @@ export class VerifySession {
 
   /** Generate the first question. Must be called after construction. */
   async init(): Promise<void> {
-    const startDifficulty = configDifficultyToIRT(this.config.difficulty);
+    // Load important concepts for the mastery loop
+    const importantNodes = await getImportantConcepts(
+      this.contentId, IMPORTANT_CONCEPT_THRESHOLD, MIN_IMPORTANT_CONCEPTS
+    );
+    for (const node of importantNodes) {
+      this.conceptMastery.set(node.id, {
+        conceptId: node.id,
+        label: node.label,
+        importance: node.importance,
+        status: 'untested',
+        askCount: 0,
+      });
+    }
+
+    console.log(`[Session] Loaded ${importantNodes.length} important concept(s):`);
+    for (const node of importantNodes) {
+      console.log(`  · ${node.label} (id=${node.id}, importance=${node.importance.toFixed(2)})`);
+    }
+
+    await this._generateNextQuestion();
+  }
+
+  private async _generateNextQuestion(): Promise<void> {
+    const target = selectNextQuestion(this.irtState, this.conceptMastery);
+    this._currentTarget = { conceptId: target.targetConceptId, edgeDirection: target.edgeDirection };
+    this.targetDifficulties.push(target.b_target);
+
+    const qType = this.pickQuestionType(target.b_target);
+    const previousQuestions = this.questionHistory.map(q => q.question);
     const chunkIdx = selectChunkIndex(this.chunkUsageCount);
     this.chunkUsageCount[chunkIdx]++;
     this._currentChunkIndex = chunkIdx;
-    this.targetDifficulties.push(startDifficulty);
 
-    const qType = this.pickQuestionType();
+    // Store which concept is being targeted so submitAnswer can update its status
+    this._currentTarget = {
+      conceptId: target.targetConceptId,
+      edgeDirection: target.edgeDirection,
+    };
+
     this._currentQuestion = await generateQuestion(
       this.contentId,
       this.chunks[chunkIdx],
-      startDifficulty,
-      [],
+      target.b_target,
+      previousQuestions,
       qType,
-      this.opts
+      this.opts,
+      target.targetConceptId ?? undefined,
+      target.edgeDirection
     );
   }
 
@@ -171,14 +224,37 @@ export class VerifySession {
     const currentQ = this._currentQuestion;
     const sourceChunk = this.chunks[this._currentChunkIndex] || this.chunks[0];
 
-    // Grade based on question type
+    // Grade
     let gradeResult: GradeResult;
     if ((currentQ.type === "mcq" || currentQ.type === "true_false") && currentQ.correctAnswer) {
       gradeResult = gradeMCQOrTF(answer, currentQ.correctAnswer, currentQ.type);
     } else {
       gradeResult = await gradeAnswer(
-        currentQ.question, answer, sourceChunk, currentQ.targetConcept, this.opts
+        currentQ.question, answer, sourceChunk, currentQ.targetConcept, this.opts,
+        currentQ.referenceKeyPoints, currentQ.conceptContext
       );
+    }
+
+    // Update concept mastery
+    const targetConceptId = this._currentTarget.conceptId;
+    if (targetConceptId) {
+      const cm = this.conceptMastery.get(targetConceptId);
+      if (cm) {
+        const newAskCount = cm.askCount + 1;
+        let newStatus: ConceptMastery['status'];
+        if (gradeResult.correct) {
+          newStatus = 'mastered';
+        } else if (newAskCount >= 3) {
+          newStatus = 'failed_final';
+        } else {
+          newStatus = 'failed';
+        }
+        this.conceptMastery.set(targetConceptId, { ...cm, status: newStatus, askCount: newAskCount });
+        console.log(
+          `[Mastery] "${cm.label}" ${cm.status} → ${newStatus}` +
+          ` (ask #${newAskCount}, ${gradeResult.correct ? "✓" : "✗"}, score=${gradeResult.score})`
+        );
+      }
     }
 
     // Record in history
@@ -195,16 +271,50 @@ export class VerifySession {
     };
     this.questionHistory.push(entry);
 
-    // Update IRT using the target difficulty we computed (not LLM's)
+    // Bloom coverage (kept for cognitive profile)
+    const bl = currentQ.bloomLevel;
+    this.bloomCoverage[bl] = (this.bloomCoverage[bl] ?? 0) + 1;
+
+    // 4PL IRT update: combine LLM b with predictor b, use predictor a and d
     const qIndex = this.questionHistory.length - 1;
-    const targetDifficulty = this.targetDifficulties[qIndex] ?? 0;
-    this.irtState = updateAbility(
-      this.irtState,
-      targetDifficulty,
-      gradeResult.correct,
-      gradeResult.score,
-      currentQ.bloomLevel
+    const b_llm = this.targetDifficulties[qIndex] ?? 0;
+    const c = questionTypeC(currentQ.type);
+    const theta_before = this.irtState.theta;
+
+    // Call predictor sidecar (fire-and-forget style — don't block the session)
+    const predictorParams = await predictIRTParams(
+      currentQ.question,
+      currentQ.options ?? []
     );
+    const b_combined = predictorParams
+      ? 0.85 * b_llm + 0.15 * predictorParams.b
+      : b_llm;
+    const a = predictorParams ? Math.max(0.5, Math.min(2.5, predictorParams.a)) : 1.0;
+    const d = predictorParams ? Math.max(0.75, Math.min(1.0, predictorParams.d)) : 0.95;
+
+    this.irtState = updateAbility(
+      this.irtState, b_combined, a, c, d,
+      gradeResult.correct, gradeResult.score, currentQ.bloomLevel
+    );
+
+    const irtParams = { a, b_llm, b_pred: predictorParams?.b ?? null, b_used: b_combined, c, d, theta_before };
+
+    console.log(
+      `[IRT] Q${this.questionHistory.length} ${gradeResult.correct ? "✓" : "✗"}` +
+      `  b_llm=${b_llm.toFixed(3)} b_pred=${predictorParams ? predictorParams.b.toFixed(3) : "n/a"}` +
+      `  b_used=${b_combined.toFixed(3)}  a=${a.toFixed(3)}  c=${c}  d=${d.toFixed(3)}` +
+      `  bloom=${currentQ.bloomLevel}(w=${(BLOOM_WEIGHTS[currentQ.bloomLevel] ?? 0.5).toFixed(2)})` +
+      `  type=${currentQ.type}` +
+      `  → θ=${this.irtState.theta.toFixed(4)}  SE=${this.irtState.se.toFixed(4)}`
+    );
+
+    if (currentQ.type === "open" && gradeResult.dimensions) {
+      const dim = gradeResult.dimensions;
+      console.log(
+        `[Grade] open: ${dim.covered_points}/${dim.total_points} points covered` +
+        `  cap=${dim.precision_cap}  final=${gradeResult.score}`
+      );
+    }
 
     const questionNumber = this.questionHistory.length;
     const progress = {
@@ -214,31 +324,23 @@ export class VerifySession {
       bloomLevel: difficultyToBloom(this.irtState.theta),
     };
 
-    // Check completion: config max_questions OR IRT convergence
-    const isComplete = questionNumber >= this.config.max_questions || this.irtState.converged;
+    // Stopping conditions
+    const masteryComplete = isConceptMasteryComplete(this.conceptMastery, this.irtState.se);
+    const isComplete = questionNumber >= this.config.max_questions
+      || this.irtState.converged
+      || masteryComplete;
 
     if (isComplete) {
+      const stopReason = questionNumber >= this.config.max_questions
+        ? `max_questions=${this.config.max_questions}`
+        : this.irtState.converged
+          ? `IRT_converged (SE=${this.irtState.se.toFixed(4)})`
+          : `mastery_complete (SE=${this.irtState.se.toFixed(4)})`;
+      console.log(`[Session] Complete — reason: ${stopReason}  θ=${this.irtState.theta.toFixed(4)}  score=${thetaToScore(this.irtState.theta)}`);
       this._complete = true;
       this._currentQuestion = null;
     } else {
-      // Generate next question
-      const nextDifficulty = selectNextDifficulty(this.irtState);
-      this.targetDifficulties.push(nextDifficulty);
-
-      const previousQuestions = this.questionHistory.map(q => q.question);
-      const nextChunkIdx = selectChunkIndex(this.chunkUsageCount);
-      this.chunkUsageCount[nextChunkIdx]++;
-      this._currentChunkIndex = nextChunkIdx;
-
-      const qType = this.pickQuestionType();
-      this._currentQuestion = await generateQuestion(
-        this.contentId,
-        this.chunks[nextChunkIdx],
-        nextDifficulty,
-        previousQuestions,
-        qType,
-        this.opts
-      );
+      await this._generateNextQuestion();
     }
 
     return {
@@ -246,6 +348,8 @@ export class VerifySession {
       score: gradeResult.score,
       reasoning: gradeResult.reasoning,
       dimensions: gradeResult.dimensions,
+      irtParams,
+      referenceKeyPoints: currentQ.type === "open" ? currentQ.referenceKeyPoints : undefined,
       progress,
       isComplete,
     };
@@ -266,8 +370,10 @@ export class VerifySession {
     const ciLow = thetaToScore(this.irtState.theta - 1.96 * this.irtState.se);
     const ciHigh = thetaToScore(this.irtState.theta + 1.96 * this.irtState.se);
 
-    // Convergence: IRT estimate is stable when SE < 0.4
-    const converged = this.irtState.se < 0.4;
+    // Convergence: IRT estimate stable (SE < 0.40, matching SE_THRESHOLD).
+    const converged = this.irtState.se < 0.40;
+    // Person-fit flag: annotate when response pattern is potentially aberrant.
+    const aberrant = isAberrant(this.irtState);
 
     // Question types used (deduplicated)
     const questionTypes = [...new Set(this.questionHistory.map(q => q.type))];
@@ -287,6 +393,8 @@ export class VerifySession {
       score,
       questionCount: this.questionHistory.length,
       bloomLevelsReached,
+      bloomCoverage: this.bloomCoverage,
+      aberrant,
       passed,
       converged,
       confidenceInterval: [ciLow, ciHigh],
@@ -362,10 +470,17 @@ export class VerifySession {
     };
   }
 
-  /** Randomly pick a question type from the configured types. */
-  private pickQuestionType(): QuestionType {
+  /**
+   * Pick question type.
+   * Single-type sessions: always return that type.
+   * Multi-type (mixed): difficulty-driven — T/F easy, MCQ medium, Open hard.
+   */
+  private pickQuestionType(b_target: number): QuestionType {
     const types = this.config.q_types;
-    return types[Math.floor(Math.random() * types.length)];
+    if (types.length === 1) return types[0];
+    if (b_target < -0.5) return "true_false";
+    if (b_target < 0.5)  return "mcq";
+    return "open";
   }
 
   // ─── Serialization for Redis persistence ─────────────────────────────────
@@ -379,6 +494,9 @@ export class VerifySession {
       subject: this.subject,
       config: this.config,
       chunkUsageCount: this.chunkUsageCount,
+      bloomCoverage: this.bloomCoverage,
+      conceptMastery: [...this.conceptMastery.entries()],
+      currentTarget: this._currentTarget,
       irtState: this.irtState,
       questionHistory: this.questionHistory,
       currentQuestion: this._currentQuestion,
@@ -396,8 +514,11 @@ export class VerifySession {
     (session as any).knowledgeId = snap.knowledgeId;
     (session as any).subject = snap.subject;
     (session as any).config = snap.config;
-    (session as any).chunks = []; // reloaded from contentCache on demand
+    (session as any).chunks = [];
     (session as any).chunkUsageCount = snap.chunkUsageCount;
+    (session as any).bloomCoverage = snap.bloomCoverage ?? {};
+    (session as any).conceptMastery = new Map(snap.conceptMastery ?? []);
+    (session as any)._currentTarget = snap.currentTarget ?? { conceptId: null, edgeDirection: 'direct' };
     (session as any).opts = { language: snap.config.language, persona: snap.config.persona, model: snap.config.model };
     (session as any).irtState = snap.irtState;
     (session as any).questionHistory = snap.questionHistory;

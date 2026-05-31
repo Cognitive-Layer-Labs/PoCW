@@ -16,6 +16,7 @@ COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/package.json ./
 COPY ai-config.yml ./
+COPY public ./public
 
 RUN mkdir -p data && chown -R appuser:appgroup /app
 

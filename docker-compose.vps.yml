@@ -38,16 +38,28 @@ services:
     networks:
       - pocw_internal
 
+  predictor:
+    build:
+      context: ./predictor
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:3001/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    networks:
+      - pocw_internal
+
   oracle:
     build:
       context: ./oracle-service
     restart: unless-stopped
-    ports:
-      - "127.0.0.1:3000:3000"
     depends_on:
       falkordb:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      predictor:
         condition: service_healthy
     environment:
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
@@ -59,6 +71,7 @@ services:
       - FALKORDB_GRAPH=${FALKORDB_GRAPH:-pocw}
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/1
       - PORT=3000
+      - PREDICTOR_URL=http://predictor:3001
     volumes:
       - oracle_data:/app/data
     healthcheck:
@@ -69,10 +82,42 @@ services:
     networks:
       - pocw_internal
 
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/templates/default.conf.template:ro
+      - certbot_www:/var/www/certbot:ro
+      - certbot_certs:/etc/letsencrypt:ro
+    environment:
+      - ORACLE_DOMAIN=${ORACLE_DOMAIN}
+    depends_on:
+      oracle:
+        condition: service_healthy
+    networks:
+      - pocw_internal
+
+  certbot:
+    image: certbot/certbot
+    volumes:
+      - certbot_www:/var/www/certbot
+      - certbot_certs:/etc/letsencrypt
+    entrypoint: >
+      sh -c "trap exit TERM;
+             while :; do
+               certbot renew --webroot -w /var/www/certbot --quiet;
+               sleep 12h & wait $${!};
+             done"
+
 volumes:
   falkor_data:
   redis_data:
   oracle_data:
+  certbot_www:
+  certbot_certs:
 
 networks:
   pocw_internal:

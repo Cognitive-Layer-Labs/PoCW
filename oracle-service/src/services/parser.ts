@@ -1,5 +1,7 @@
 import pdfParse from "pdf-parse";
 import { JSDOM } from "jsdom";
+import * as fs from "fs";
+import { fileURLToPath } from "url";
 
 /**
  * Parse content from a URL into plain text.
@@ -17,6 +19,19 @@ import { JSDOM } from "jsdom";
  * WS6: Errors propagate to the caller — no silent fallbacks.
  */
 export async function parseContentToText(url: string): Promise<string> {
+  // Local file support via file:// URLs
+  if (url.startsWith("file://")) {
+    const filePath = fileURLToPath(url);
+    const buffer = fs.readFileSync(filePath);
+    if (url.endsWith(".pdf") || isPDF("application/pdf", url)) {
+      const parsePdf = pdfParse as unknown as (data: Buffer) => Promise<{ text: string }>;
+      const pdf = await parsePdf(buffer);
+      if (!pdf.text.trim()) throw new Error("No text found in PDF — it may be image-only");
+      return truncate(cleanText(pdf.text));
+    }
+    return truncate(cleanText(buffer.toString("utf8")));
+  }
+
   const validationError = validateSourceUrl(url);
   if (validationError) {
     throw new Error(validationError);
@@ -67,9 +82,7 @@ export async function parseContentToText(url: string): Promise<string> {
 
   if (isHTML(contentType, url)) {
     const html = await res.text();
-    const dom = new JSDOM(html);
-    const text = dom.window.document.body.textContent || "";
-    return truncate(cleanText(text));
+    return truncate(cleanText(extractMainContent(html)));
   }
 
   throw new Error(`Unsupported content type: ${contentType}`);
@@ -183,6 +196,75 @@ function isIPFS(url: string): boolean {
 
 function normalizeIPFS(url: string): string {
   return url.replace("ipfs://", "https://ipfs.io/ipfs/");
+}
+
+/**
+ * Extract main article content from HTML, removing all navigation/UI boilerplate.
+ * Strategy:
+ *   1. Remove known noise elements (nav, footer, sidebars, scripts, ads, Wikipedia UI).
+ *   2. Find the best main content container (article, main, #bodyContent, etc.).
+ *   3. Fall back to cleaned body if nothing specific found.
+ */
+function extractMainContent(html: string): string {
+  const dom = new JSDOM(html);
+  const doc = dom.window.document;
+
+  // Remove all noise elements before extracting any text
+  const noiseSelectors = [
+    "script", "style", "noscript", "iframe",
+    "nav", "header", "footer", "aside",
+    // Wikipedia-specific
+    "#mw-navigation", "#mw-head", "#mw-panel", "#footer", "#catlinks",
+    ".navbox", ".navbox-inner", ".navbox-title",
+    ".sidebar", ".mw-portlet", ".mw-indicators",
+    ".reflist", ".references", ".reference",
+    "#toc", ".toc",
+    ".hatnote", ".ambox", ".tmbox", ".ombox",
+    // General boilerplate
+    "[role=navigation]", "[role=banner]", "[role=contentinfo]",
+    ".cookie-notice", ".cookie-banner", ".gdpr",
+    ".advertisement", ".ad", ".ads",
+    ".related-articles", ".recommended",
+    ".share-buttons", ".social-share",
+    ".breadcrumb", ".pagination",
+    ".comments", "#comments",
+  ];
+
+  for (const sel of noiseSelectors) {
+    try {
+      doc.querySelectorAll(sel).forEach((el: Element) => el.remove());
+    } catch { /* ignore invalid selectors */ }
+  }
+
+  // Try to find the main content region in priority order
+  const mainSelectors = [
+    // Wikipedia
+    "#mw-content-text",
+    "#bodyContent",
+    // Semantic HTML5
+    "main",
+    "article",
+    // Common CMS/blog patterns
+    "#content",
+    "#main-content",
+    "#article-body",
+    ".article-content",
+    ".post-content",
+    ".entry-content",
+    "[role=main]",
+  ];
+
+  for (const sel of mainSelectors) {
+    try {
+      const el = doc.querySelector(sel);
+      if (el) {
+        const text = (el as HTMLElement).textContent || "";
+        if (text.trim().length > 200) return text;
+      }
+    } catch { /* ignore */ }
+  }
+
+  return doc.body?.textContent || "";
 }
 
 function cleanText(text: string): string {

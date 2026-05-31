@@ -1,21 +1,37 @@
-node_modules
+# Dependencies
+node_modules/
+
+# Environment
 .env
-.logs/
-.DS_Store
 .env.local
-.env.development.local
-.env.test.local
-.env.production.local
 .env.development
 .env.test
 .env.production
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
 
-cache
-artifacts
-dist
+# Build artifacts
+cache/
+artifacts/
+dist/
+typechain-types/
+
+# Hardhat / Foundry
+deployments/localhost.json
+
+# Oracle data (SQLite, session profiles)
+data/
+oracle-service/data/
+
+# Predictor model binaries (baked into Docker image, not committed)
+predictor/model/*.pkl
+predictor/model/*.npy
+
+# Logs
+.logs/
+
+# OS
+.DS_Store
+
+# Editor
 .cursorrules
 .vscode
+.claude/

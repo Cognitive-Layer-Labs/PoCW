@@ -1,0 +1,806 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>KAQG Explorer</title>
+  <script src="https://cdn.jsdelivr.net/npm/vis-network@9.1.9/dist/vis-network.min.js"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/vis-network@9.1.9/dist/dist/vis-network.min.css" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; overflow: hidden; }
+    :root {
+      --bg: #0c0c12; --surface: #14141f; --border: #252535;
+      --accent: #7c3aed; --accent2: #a78bfa;
+      --text: #e2e8f0; --muted: #64748b; --muted2: #94a3b8;
+    }
+    body { font-family: system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); display: flex; flex-direction: column; }
+
+    /* ── Header ── */
+    header { flex-shrink: 0; padding: 12px 20px; background: var(--surface); border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 14px; }
+    header h1 { font-size: 15px; font-weight: 700; color: var(--accent2); white-space: nowrap; }
+    .tag { font-size: 10px; padding: 2px 6px; border-radius: 4px; background: #1e1b4b; color: var(--accent2); border: 1px solid #312e81; }
+
+    /* ── Two-column layout — fills remaining viewport height ── */
+    .panels { flex: 1; min-height: 0; display: grid; grid-template-columns: 360px 1fr; overflow: hidden; }
+
+    /* ── Sidebar scrolls independently ── */
+    .sidebar { overflow-y: auto; background: var(--surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; }
+    .panel-section { padding: 16px 18px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+    h2 { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.8px; color: var(--muted); margin-bottom: 10px; }
+
+    /* ── Form elements ── */
+    label { display: block; font-size: 12px; color: var(--muted2); margin-bottom: 4px; }
+    input[type=text], input[type=url], input[type=number], select {
+      width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text);
+      padding: 7px 10px; border-radius: 6px; font-size: 13px; outline: none; transition: border-color 0.15s;
+    }
+    input:focus, select:focus { border-color: var(--accent); }
+    .row { display: flex; gap: 8px; margin-bottom: 10px; }
+    .row > * { flex: 1; min-width: 0; }
+
+    /* ── Buttons ── */
+    .btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 8px 14px; border-radius: 6px; font-size: 13px; font-weight: 500; cursor: pointer; border: none; transition: all 0.15s; white-space: nowrap; }
+    .btn-primary { background: var(--accent); color: #fff; }
+    .btn-primary:hover:not(:disabled) { background: #6d28d9; }
+    .btn-secondary { background: #1e1b3a; color: var(--accent2); border: 1px solid #312e81; }
+    .btn-secondary:hover:not(:disabled) { background: #27244a; }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn-full { width: 100%; margin-top: 8px; }
+
+    /* ── Status bar ── */
+    .status-bar { font-size: 12px; margin-top: 8px; min-height: 16px; display: flex; align-items: center; gap: 6px; color: var(--muted2); }
+    .dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+    .dot-idle { background: var(--muted); }
+    .dot-loading { background: #f59e0b; animation: pulse 1s infinite; }
+    .dot-ok { background: #22c55e; }
+    .dot-err { background: #ef4444; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+
+    /* ── File upload ── */
+    .upload-area { border: 1.5px dashed var(--border); border-radius: 6px; padding: 12px; text-align: center; cursor: pointer; transition: border-color 0.15s; position: relative; font-size: 12px; color: var(--muted2); }
+    .upload-area:hover { border-color: var(--accent); }
+    .upload-area input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+    .upload-area.has-file { border-color: #22c55e; color: #22c55e; }
+
+    /* ── Right column: graph on top, questions below ── */
+    .main-area { display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
+    #graph-canvas { flex: 1; min-height: 0; overflow: hidden; position: relative; }
+    #graph-placeholder { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--muted); font-size: 13px; }
+
+    /* ── Questions panel — fixed height, independent scroll ── */
+    .questions-wrap { flex-shrink: 0; height: 300px; background: var(--surface); border-top: 1px solid var(--border); display: none; flex-direction: column; overflow: hidden; }
+    .questions-wrap.visible { display: flex; }
+    .q-header { flex-shrink: 0; padding: 10px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; background: var(--surface); }
+    .q-header h2 { margin: 0; }
+    .q-count { font-size: 11px; color: var(--muted); }
+    .q-list { flex: 1; overflow-y: auto; padding: 10px 14px; display: flex; flex-direction: column; gap: 8px; }
+    .q-card { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; flex-shrink: 0; }
+    .q-card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+    .q-num { font-size: 11px; font-weight: 600; color: var(--muted); min-width: 22px; }
+    .bloom-badge { font-size: 10px; padding: 2px 7px; border-radius: 10px; font-weight: 600; }
+    .type-badge { font-size: 10px; padding: 2px 7px; border-radius: 10px; background: #1e1b3a; color: var(--accent2); }
+    .diff-badge { font-size: 10px; color: var(--muted); margin-left: auto; }
+    .q-text { font-size: 13px; line-height: 1.5; }
+    .q-options { margin-top: 6px; display: flex; flex-direction: column; gap: 3px; }
+    .q-option { font-size: 12px; padding: 4px 8px; border-radius: 4px; background: #1a1a2e; color: var(--muted2); }
+    .q-spinner { text-align: center; padding: 20px; color: var(--muted); font-size: 13px; }
+
+    /* ── Legend ── */
+    .legend { display: flex; flex-wrap: wrap; gap: 6px; }
+    .legend-item { display: flex; align-items: center; gap: 4px; font-size: 11px; }
+    .legend-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+
+    /* ── Stats ── */
+    .theta-bar { display: flex; gap: 8px; flex-wrap: wrap; }
+    .stat { display: flex; flex-direction: column; align-items: center; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 7px 12px; min-width: 64px; }
+    .stat-val { font-size: 16px; font-weight: 700; color: var(--accent2); }
+    .stat-lbl { font-size: 10px; color: var(--muted); margin-top: 2px; }
+
+    /* ── Divider ── */
+    .or-divider { text-align: center; font-size: 11px; color: var(--muted); margin: 8px 0; position: relative; }
+    .or-divider::before, .or-divider::after { content: ""; position: absolute; top: 50%; width: 40%; height: 1px; background: var(--border); }
+    .or-divider::before { left: 0; } .or-divider::after { right: 0; }
+
+    /* ── Fullscreen graph modal ── */
+    .graph-modal { display: none; position: fixed; inset: 0; z-index: 100; background: #090910; flex-direction: column; }
+    .graph-modal.open { display: flex; }
+    .graph-modal-bar { flex-shrink: 0; height: 46px; background: var(--surface); border-bottom: 1px solid var(--border); display: flex; align-items: center; padding: 0 16px; gap: 10px; }
+    .graph-modal-bar h2 { margin: 0; font-size: 13px; font-weight: 600; color: var(--text); text-transform: none; letter-spacing: 0; white-space: nowrap; }
+    .graph-modal-bar .node-info { font-size: 12px; color: var(--muted2); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .modal-body { flex: 1; min-height: 0; display: flex; overflow: hidden; }
+    #modal-graph { flex: 1; min-height: 0; }
+    .modal-legend { display: flex; gap: 10px; flex-wrap: wrap; }
+
+    /* ── Stats panel ── */
+    .stats-panel { width: 280px; flex-shrink: 0; background: var(--surface); border-left: 1px solid var(--border); overflow-y: auto; padding: 16px; display: none; flex-direction: column; gap: 20px; }
+    .stats-panel.open { display: flex; }
+    .stats-section-title { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.8px; color: var(--muted); margin-bottom: 10px; }
+    .bloom-bar-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 12px; }
+    .bloom-bar-label { width: 72px; flex-shrink: 0; }
+    .bloom-bar-track { flex: 1; height: 8px; background: var(--border); border-radius: 4px; overflow: hidden; }
+    .bloom-bar-fill { height: 100%; border-radius: 4px; }
+    .bloom-bar-count { width: 20px; text-align: right; color: var(--muted); font-size: 11px; }
+    .node-rank-item { display: flex; align-items: center; gap: 8px; padding: 5px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
+    .node-rank-item:last-child { border-bottom: none; }
+    .node-rank-num { font-size: 10px; color: var(--muted); width: 16px; flex-shrink: 0; }
+    .node-rank-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .node-rank-score { font-size: 11px; color: var(--accent2); font-weight: 600; white-space: nowrap; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>KAQG Explorer</h1>
+  <span class="tag">PoCW Research Tool</span>
+</header>
+
+<div class="panels">
+
+  <!-- ── Sidebar ── -->
+  <div class="sidebar">
+
+    <!-- Step 1: Index -->
+    <div class="panel-section">
+      <h2>1 · Index Content</h2>
+
+      <label>URL (HTTP/HTTPS/IPFS)</label>
+      <div class="row">
+        <input type="url" id="url-input" placeholder="https://en.wikipedia.org/wiki/..." />
+      </div>
+
+      <div class="or-divider">or upload a file</div>
+
+      <div class="upload-area" id="upload-area">
+        <input type="file" id="file-input" accept=".txt,.pdf,.md" />
+        <span id="upload-label">Click or drag a .txt / .pdf file here</span>
+      </div>
+
+      <button class="btn btn-primary btn-full" id="index-btn" onclick="doIndex()">Index Content</button>
+      <div class="status-bar">
+        <div class="dot dot-idle" id="index-dot"></div>
+        <span id="index-status">Ready</span>
+      </div>
+    </div>
+
+    <!-- Step 2: Config -->
+    <div class="panel-section">
+      <h2>2 · Session Config</h2>
+      <div class="row">
+        <div>
+          <label>Max questions</label>
+          <input type="number" id="max-q" value="10" min="3" max="30" />
+        </div>
+        <div>
+          <label>Difficulty</label>
+          <select id="difficulty">
+            <option value="0.2">Easy</option>
+            <option value="0.5" selected>Mixed</option>
+            <option value="0.8">Hard</option>
+          </select>
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label>Question types</label>
+          <select id="q-types" multiple size="3" style="height:66px">
+            <option value="open" selected>Open (hard)</option>
+            <option value="mcq" selected>MCQ (medium)</option>
+            <option value="true_false" selected>True / False (easy)</option>
+          </select>
+        </div>
+      </div>
+      <p style="font-size:11px;color:var(--muted);margin-top:4px">All 3 selected = Mixed (difficulty-driven). Single = fixed type.</p>
+
+      <button class="btn btn-primary btn-full" id="generate-btn" onclick="doGenerate()" disabled>
+        Generate Questions
+      </button>
+      <div class="status-bar">
+        <div class="dot dot-idle" id="gen-dot"></div>
+        <span id="gen-status">Index content first</span>
+      </div>
+    </div>
+
+    <!-- Step 3: Stats -->
+    <div class="panel-section" id="stats-section" style="display:none">
+      <h2>Session Stats</h2>
+      <div class="theta-bar" id="theta-bar"></div>
+    </div>
+
+    <!-- Graph button -->
+    <div class="panel-section" id="graph-btn-section" style="display:none">
+      <button class="btn btn-secondary btn-full" onclick="openGraphModal()" style="gap:8px">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="5" cy="5" r="2"/><circle cx="19" cy="5" r="2"/><circle cx="12" cy="19" r="2"/><line x1="5" y1="7" x2="12" y2="17"/><line x1="19" y1="7" x2="12" y2="17"/><line x1="5" y1="5" x2="19" y2="5"/></svg>
+        View Knowledge Graph
+      </button>
+    </div>
+
+    <!-- Legend -->
+    <div class="panel-section">
+      <h2>Bloom Levels</h2>
+      <div class="legend" id="legend"></div>
+    </div>
+
+  </div>
+
+  <!-- ── Main: Graph + Questions ── -->
+  <div class="main-area">
+    <div id="graph-canvas">
+      <div id="graph-placeholder">Index content to see the knowledge graph</div>
+    </div>
+
+    <div class="questions-wrap" id="questions-wrap">
+      <div class="q-header">
+        <h2>Generated Questions</h2>
+        <span class="q-count" id="q-count"></span>
+        <button class="btn btn-secondary" onclick="exportJSON()" style="margin-left:auto;font-size:11px;padding:5px 12px">Export JSON</button>
+      </div>
+      <div class="q-list" id="q-list"></div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ── Fullscreen graph modal ── -->
+<div class="graph-modal" id="graph-modal">
+  <div class="graph-modal-bar">
+    <h2>Knowledge Graph</h2>
+    <span class="node-info" id="modal-node-info">Click a node to inspect it</span>
+    <div class="modal-legend" id="modal-legend"></div>
+    <button class="btn btn-secondary" onclick="toggleStats()" id="stats-toggle-btn" style="font-size:12px;padding:5px 12px">Stats</button>
+    <button class="btn btn-secondary" onclick="closeGraphModal()" style="font-size:12px;padding:5px 12px">✕ Close</button>
+  </div>
+  <div class="modal-body">
+    <div id="modal-graph"></div>
+    <div class="stats-panel" id="stats-panel"></div>
+  </div>
+</div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────────────────────
+const BLOOM_COLORS = {
+  Remember:   { bg:"#374151", fg:"#9ca3af", dot:"#6b7280" },
+  Understand: { bg:"#1e3a5f", fg:"#93c5fd", dot:"#3b82f6" },
+  Apply:      { bg:"#14532d", fg:"#86efac", dot:"#22c55e" },
+  Analyze:    { bg:"#713f12", fg:"#fcd34d", dot:"#f59e0b" },
+  Evaluate:   { bg:"#7c2d12", fg:"#fdba74", dot:"#f97316" },
+  Create:     { bg:"#581c87", fg:"#d8b4fe", dot:"#a855f7" },
+};
+
+let state = { knowledgeId: null, contentId: null, questions: [], network: null };
+
+// ── Legend ────────────────────────────────────────────────────────────────────
+document.getElementById("legend").innerHTML =
+  Object.entries(BLOOM_COLORS).map(([lv, c]) =>
+    `<div class="legend-item"><div class="legend-dot" style="background:${c.dot}"></div><span>${lv}</span></div>`
+  ).join("");
+
+// ── File upload UI ─────────────────────────────────────────────────────────────
+const fileInput = document.getElementById("file-input");
+const uploadArea = document.getElementById("upload-area");
+fileInput.addEventListener("change", () => {
+  const f = fileInput.files[0];
+  document.getElementById("upload-label").textContent = f ? `📄 ${f.name}` : "Click or drag a .txt / .pdf file here";
+  uploadArea.classList.toggle("has-file", !!f);
+  if (f) document.getElementById("url-input").value = "";
+});
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function setIndexStatus(state, msg) {
+  document.getElementById("index-dot").className = `dot dot-${state}`;
+  document.getElementById("index-status").textContent = msg;
+}
+function setGenStatus(state, msg) {
+  document.getElementById("gen-dot").className = `dot dot-${state}`;
+  document.getElementById("gen-status").textContent = msg;
+}
+
+async function api(method, path, body, isFormData) {
+  const opts = { method, headers: {} };
+  if (body && !isFormData) { opts.headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(body); }
+  else if (body && isFormData) { opts.body = body; }
+  const r = await fetch(path, opts);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || r.statusText);
+  return data;
+}
+
+async function poll(knowledgeId) {
+  for (let i = 0; i < 120; i++) {
+    const s = await api("GET", `/api/index/${knowledgeId}`);
+    if (s.status === "ready") return s;
+    if (s.status === "error") throw new Error(s.error || "Indexing failed");
+    setIndexStatus("loading", `Indexing… (${i * 2}s)`);
+    await new Promise(r => setTimeout(r, 2000));
+  }
+  throw new Error("Indexing timed out after 4 minutes");
+}
+
+// ── Step 1: Index ─────────────────────────────────────────────────────────────
+async function doIndex() {
+  const btn = document.getElementById("index-btn");
+  const url = document.getElementById("url-input").value.trim();
+  const file = fileInput.files[0];
+
+  if (!url && !file) { setIndexStatus("err", "Provide a URL or upload a file"); return; }
+
+  btn.disabled = true;
+  setIndexStatus("loading", "Submitting…");
+
+  try {
+    let result;
+    if (file) {
+      const ct = file.name.endsWith(".pdf") ? "application/pdf" : "text/plain";
+      const buf = await file.arrayBuffer();
+      const r = await fetch("/api/upload", { method: "POST", headers: { "Content-Type": ct }, body: buf });
+      result = await r.json();
+      if (!r.ok) throw new Error(result.error || r.statusText);
+    } else {
+      result = await api("POST", "/api/index", { source: url });
+    }
+
+    state.knowledgeId = result.knowledgeId;
+    state.contentId = result.contentId;
+    setIndexStatus("loading", "Waiting for indexing…");
+
+    if (result.status !== "ready") {
+      const ready = await poll(state.knowledgeId);
+      state.contentId = ready.contentId ?? state.contentId;
+    }
+
+    setIndexStatus("ok", `Ready · ID ${state.contentId}`);
+    document.getElementById("generate-btn").disabled = false;
+    setGenStatus("idle", "Ready to generate");
+    document.getElementById("graph-btn-section").style.display = "block";
+    cachedGraph = null; // reset cache when new content indexed
+
+    await loadGraph();
+  } catch (e) {
+    setIndexStatus("err", e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ── Graph ─────────────────────────────────────────────────────────────────────
+async function loadGraph() {
+  const canvas = document.getElementById("graph-canvas");
+
+  const placeholder = document.getElementById("graph-placeholder");
+
+  try {
+    const g = await api("GET", `/api/graph/${state.contentId}`);
+    if (!g.nodes?.length) {
+      if (placeholder) placeholder.textContent = "No KG nodes found (FalkorDB may be unavailable)";
+      return;
+    }
+
+    if (placeholder) placeholder.style.display = "none";
+
+    const nodes = new vis.DataSet(g.nodes.map(n => {
+      const c = BLOOM_COLORS[n.bloomLevel] || BLOOM_COLORS.Understand;
+      return {
+        id: n.id, label: n.label,
+        color: { background: c.bg, border: c.dot, highlight: { background: c.dot, border: "#fff" } },
+        font: { color: c.fg, size: 12 },
+        size: 10 + (n.importance || 0.5) * 20,
+        borderWidth: 2, _meta: n,
+      };
+    }));
+
+    const edges = new vis.DataSet(g.edges.map((e, i) => ({
+      id: i, from: e.source, to: e.target, label: e.relationship,
+      color: { color: "#252535", highlight: "#7c3aed" },
+      font: { color: "#64748b", size: 9, align: "middle" },
+      arrows: { to: { enabled: true, scaleFactor: 0.4 } },
+      smooth: { type: "dynamic" },
+    })));
+
+    if (state.network) state.network.destroy();
+    state.network = new vis.Network(canvas, { nodes, edges }, {
+      physics: { solver: "forceAtlas2Based", stabilization: { iterations: 150 } },
+      interaction: { hover: true },
+    });
+
+    // Show node details on click
+    const info = document.createElement("div");
+    info.style.cssText = "position:absolute;bottom:16px;right:16px;background:#14141f;border:1px solid #252535;border-radius:8px;padding:12px 14px;font-size:12px;display:none;max-width:220px;pointer-events:none;";
+    canvas.style.position = "relative";
+    canvas.appendChild(info);
+
+    state.network.on("click", p => {
+      if (!p.nodes.length) { info.style.display = "none"; return; }
+      const n = nodes.get(p.nodes[0]);
+      if (!n) return;
+      const m = n._meta;
+      const c = BLOOM_COLORS[m.bloomLevel] || BLOOM_COLORS.Understand;
+      info.innerHTML = `<div style="font-weight:600;color:${c.dot};margin-bottom:6px">${m.label}</div>
+        <div style="color:#94a3b8">Bloom: <b style="color:${c.fg}">${m.bloomLevel}</b></div>
+        <div style="color:#94a3b8">Importance: <b>${(m.importance * 100).toFixed(0)}%</b></div>
+        <div style="color:#475569;font-size:10px;margin-top:4px">${m.id}</div>`;
+      info.style.display = "block";
+    });
+
+  } catch (e) {
+    if (placeholder) { placeholder.style.display = "flex"; placeholder.style.color = "#ef4444"; placeholder.textContent = e.message; }
+  }
+}
+
+// ── Step 2: Generate Questions ────────────────────────────────────────────────
+async function doGenerate() {
+  if (!state.knowledgeId) return;
+
+  const btn = document.getElementById("generate-btn");
+  btn.disabled = true;
+  state.questions = [];
+
+  const maxQ = parseInt(document.getElementById("max-q").value) || 10;
+  const difficulty = parseFloat(document.getElementById("difficulty").value);
+  const qTypesEl = document.getElementById("q-types");
+  const q_types = Array.from(qTypesEl.selectedOptions).map(o => o.value);
+  if (!q_types.length) q_types.push("open");
+
+  const wrap = document.getElementById("questions-wrap");
+  const list = document.getElementById("q-list");
+  wrap.classList.add("visible");
+  list.innerHTML = `<div class="q-spinner">Starting session…</div>`;
+  document.getElementById("q-count").textContent = "";
+
+  setGenStatus("loading", "Starting session…");
+
+  try {
+    // Start session
+    const session = await api("POST", "/api/verify", {
+      knowledgeId: state.knowledgeId,
+      subject: "explorer",
+      config: { max_questions: maxQ, difficulty, q_types },
+    });
+
+    let sessionId = session.sessionId;
+    let q = session.question;
+    let done = false;
+
+    list.innerHTML = "";
+
+    while (!done && q) {
+      const qData = {
+        number:    q.number ?? state.questions.length + 1,
+        text:      q.text,
+        type:      q.type,
+        bloomLevel:q.bloomLevel,
+        difficulty:q.difficulty,
+        options:   q.options,
+      };
+      state.questions.push(qData);
+      appendQuestion(list, qData);
+      document.getElementById("q-count").textContent = `${state.questions.length} questions`;
+      setGenStatus("loading", `Q${state.questions.length} of ${maxQ}…`);
+
+      // Auto-answer (wrong) to keep the session moving
+      const answer = q.type === "mcq" ? "D" : q.type === "true_false" ? "false" : "I don't know";
+      const resp = await api("POST", `/api/verify/${sessionId}/answer`, { answer });
+      done = resp.isComplete;
+      q = resp.nextQuestion;
+    }
+
+    // Fetch final result for stats
+    if (done) {
+      try {
+        const result = await api("GET", `/api/verify/${sessionId}/result`);
+        if (result) showStats(result);
+      } catch (_) {}
+    }
+
+    setGenStatus("ok", `Done · ${state.questions.length} questions generated`);
+    document.getElementById("stats-section").style.display = "block";
+    // Re-render stats panel if it's already open so IRT section appears
+    if (cachedGraph && document.getElementById("stats-panel").classList.contains("open")) {
+      const deg = {};
+      cachedGraph.edges.forEach(e => { deg[e.source] = (deg[e.source]||0)+1; deg[e.target] = (deg[e.target]||0)+1; });
+      renderStats(cachedGraph, deg);
+    }
+
+  } catch (e) {
+    setGenStatus("err", e.message);
+    list.innerHTML += `<div class="q-spinner" style="color:#ef4444">${e.message}</div>`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function appendQuestion(list, q) {
+  const bc = BLOOM_COLORS[q.bloomLevel] || BLOOM_COLORS.Understand;
+  const diffLabel = q.difficulty != null ? `b=${q.difficulty.toFixed(2)}` : "";
+
+  let optionsHTML = "";
+  if (q.type === "mcq" && q.options?.length) {
+    optionsHTML = `<div class="q-options">${q.options.map((o, i) => {
+      const lbl = String.fromCharCode(65 + i);
+      return `<div class="q-option">${lbl}) ${o}</div>`;
+    }).join("")}</div>`;
+  } else if (q.type === "true_false") {
+    optionsHTML = `<div class="q-options">
+      <div class="q-option">True</div>
+      <div class="q-option">False</div>
+    </div>`;
+  }
+
+  const div = document.createElement("div");
+  div.className = "q-card";
+  div.innerHTML = `
+    <div class="q-card-header">
+      <span class="q-num">#${q.number}</span>
+      <span class="bloom-badge" style="background:${bc.bg};color:${bc.fg}">${q.bloomLevel}</span>
+      <span class="type-badge">${q.type}</span>
+      <span class="diff-badge">${diffLabel}</span>
+    </div>
+    <div class="q-text">${q.text}</div>
+    ${optionsHTML}
+  `;
+  list.appendChild(div);
+  list.scrollTop = list.scrollHeight;
+}
+
+function showStats(result) {
+  const theta = result.theta ?? 0;
+  const score = result.score ?? 0;
+  const se = result.se ?? "—";
+  const n = result.questions_asked ?? state.questions.length;
+  const bar = document.getElementById("theta-bar");
+  bar.innerHTML = `
+    <div class="stat"><div class="stat-val">${typeof theta === "number" ? theta.toFixed(2) : theta}</div><div class="stat-lbl">θ (ability)</div></div>
+    <div class="stat"><div class="stat-val">${score}</div><div class="stat-lbl">Score /100</div></div>
+    <div class="stat"><div class="stat-val">${typeof se === "number" ? se.toFixed(2) : se}</div><div class="stat-lbl">SE</div></div>
+    <div class="stat"><div class="stat-val">${n}</div><div class="stat-lbl">Questions</div></div>
+  `;
+}
+
+// ── Fullscreen graph modal ────────────────────────────────────────────────────
+let modalNetwork = null;
+let cachedGraph = null;
+
+async function openGraphModal() {
+  document.getElementById("graph-modal").classList.add("open");
+  document.body.style.overflow = "hidden";
+
+  const container = document.getElementById("modal-graph");
+
+  if (!cachedGraph) {
+    container.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--muted);font-size:13px">Loading graph…</div>`;
+    try {
+      cachedGraph = await api("GET", `/api/graph/${state.contentId}`);
+    } catch (e) {
+      container.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#ef4444;font-size:13px">${e.message}</div>`;
+      return;
+    }
+  }
+
+  if (!cachedGraph.nodes?.length) {
+    container.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--muted);font-size:13px">No graph data available</div>`;
+    return;
+  }
+
+  container.innerHTML = "";
+
+  // Compute degree for each node — high-degree nodes get more mass so they
+  // act as anchors and push weakly-connected nodes to the periphery
+  const degree = {};
+  cachedGraph.edges.forEach(e => {
+    degree[e.source] = (degree[e.source] || 0) + 1;
+    degree[e.target] = (degree[e.target] || 0) + 1;
+  });
+
+  // Rank-based visual normalization for node SIZE gives extra spread on top of
+  // the degree-weighted 0-1 importance stored in the data.
+  const sortedByImp = [...cachedGraph.nodes].sort((a, b) => a.importance - b.importance);
+  const rankMap = {};
+  sortedByImp.forEach((n, i) => {
+    rankMap[n.id] = sortedByImp.length === 1 ? 5
+      : 1 + (i / (sortedByImp.length - 1)) * 8;
+  });
+  const visualImp = id => rankMap[id] ?? 5;
+
+  const nodes = new vis.DataSet(cachedGraph.nodes.map(n => {
+    const c = BLOOM_COLORS[n.bloomLevel] || BLOOM_COLORS.Understand;
+    const deg = degree[n.id] || 0;
+    const vImp = visualImp(n.id);
+    return {
+      id: n.id,
+      label: n.label,
+      color: { background: c.bg, border: c.dot, highlight: { background: c.dot, border: "#fff" } },
+      font: { color: c.fg, size: 14, face: "system-ui", bold: true },
+      size: 50 + vImp * 9,
+      mass: 1 + deg * 1.2,
+      borderWidth: 3,
+      shape: "dot",
+      _meta: { ...n, degree: deg },
+    };
+  }));
+
+  const edges = new vis.DataSet(cachedGraph.edges.map((e, i) => ({
+    id: i, from: e.source, to: e.target,
+    label: e.relationship,
+    color: { color: "#4a4a6e", highlight: "#a78bfa", opacity: 1 },
+    font: { color: "#a0aec0", size: 10, align: "middle", strokeWidth: 3, strokeColor: "#090910" },
+    arrows: { to: { enabled: true, scaleFactor: 0.5 } },
+    smooth: { enabled: true, type: "dynamic" },
+    width: 1.5,
+    selectionWidth: 3,
+  })));
+
+  if (modalNetwork) modalNetwork.destroy();
+  modalNetwork = new vis.Network(container, { nodes, edges }, {
+    physics: {
+      solver: "forceAtlas2Based",
+      forceAtlas2Based: {
+        gravitationalConstant: -90,   // moderate repulsion — spreads but doesn't spin
+        springLength: 130,
+        springConstant: 0.018,
+        centralGravity: 0.008,
+        damping: 0.92,                // high damping — motion dies out fast after drag
+      },
+      // updateInterval 9999 = no intermediate frames shown; graph appears already laid out
+      stabilization: { enabled: true, iterations: 400, updateInterval: 9999, fit: true },
+      minVelocity: 0.1,              // stop the simulation quickly once settled
+    },
+    interaction: { hover: true, zoomView: true, dragView: true, tooltipDelay: 80 },
+    layout: { improvedLayout: false },
+  });
+
+  // After silent stabilization: just fit the view. Physics stays ON so dragged
+  // nodes spring back to their balanced position.
+  modalNetwork.once("stabilizationIterationsDone", () => {
+    modalNetwork.fit({ animation: { duration: 400, easingFunction: "easeInOutQuad" } });
+  });
+
+  const infoEl = document.getElementById("modal-node-info");
+  modalNetwork.on("click", p => {
+    if (!p.nodes.length) { infoEl.textContent = "Click a node to inspect it"; return; }
+    const n = nodes.get(p.nodes[0]);
+    if (!n) return;
+    const m = n._meta;
+    const c = BLOOM_COLORS[m.bloomLevel] || BLOOM_COLORS.Understand;
+    infoEl.innerHTML = `<b style="color:${c.dot}">${m.label}</b> &nbsp;·&nbsp; ${m.bloomLevel} &nbsp;·&nbsp; importance <b>${(m.importance * 100).toFixed(0)}%</b> &nbsp;·&nbsp; ${m.degree} edge${m.degree !== 1 ? "s" : ""}`;
+  });
+
+  // Legend
+  document.getElementById("modal-legend").innerHTML =
+    Object.entries(BLOOM_COLORS).map(([lv, c]) =>
+      `<div class="legend-item"><div class="legend-dot" style="background:${c.dot}"></div><span style="font-size:11px;color:#94a3b8">${lv}</span></div>`
+    ).join("");
+
+  renderStats(cachedGraph, degree);
+}
+
+// ── Stats panel ───────────────────────────────────────────────────────────────
+function toggleStats() {
+  const panel = document.getElementById("stats-panel");
+  const btn = document.getElementById("stats-toggle-btn");
+  const open = panel.classList.toggle("open");
+  btn.style.background = open ? "#312e81" : "";
+  if (open && modalNetwork) setTimeout(() => modalNetwork.redraw(), 50);
+}
+
+function renderStats(graph, degree) {
+  const panel = document.getElementById("stats-panel");
+
+  // ── Bloom distribution (nodes) ──────────────────────────────────────────────
+  const bloomCount = {};
+  graph.nodes.forEach(n => { bloomCount[n.bloomLevel] = (bloomCount[n.bloomLevel] || 0) + 1; });
+  const maxBloom = Math.max(...Object.values(bloomCount), 1);
+
+  const bloomHTML = Object.entries(BLOOM_COLORS).map(([lv, c]) => {
+    const count = bloomCount[lv] || 0;
+    if (!count) return "";
+    const pct = Math.round(count / maxBloom * 100);
+    return `<div class="bloom-bar-row">
+      <span class="bloom-bar-label" style="color:${c.dot}">${lv}</span>
+      <div class="bloom-bar-track"><div class="bloom-bar-fill" style="width:${pct}%;background:${c.dot}"></div></div>
+      <span class="bloom-bar-count">${count}</span>
+    </div>`;
+  }).join("");
+
+  // ── All nodes ranked by importance (no limit) ───────────────────────────────
+  const allByImportance = [...graph.nodes].sort((a, b) => b.importance - a.importance);
+  const importanceHTML = allByImportance.map((n, i) => {
+    const c = BLOOM_COLORS[n.bloomLevel] || BLOOM_COLORS.Understand;
+    const deg = degree[n.id] || 0;
+    const pct = Math.round(n.importance * 100);
+    return `<div class="node-rank-item">
+      <span class="node-rank-num">${i + 1}</span>
+      <span class="node-rank-label" style="color:${c.fg}" title="${n.label}">${n.label}</span>
+      <span style="font-size:10px;color:${c.dot};margin-left:auto;white-space:nowrap">${pct}% · ${deg}e</span>
+    </div>`;
+  }).join("");
+
+  // ── Question IRT insights (only if questions generated) ─────────────────────
+  let questionsHTML = "";
+  if (state.questions.length > 0) {
+    // Difficulty buckets matching bloomToDifficulty ranges
+    const buckets = [
+      { label: "Remember",  range: [-3, -1],   color: BLOOM_COLORS.Remember.dot },
+      { label: "Understand",range: [-1, 0],    color: BLOOM_COLORS.Understand.dot },
+      { label: "Apply",     range: [0, 0.5],   color: BLOOM_COLORS.Apply.dot },
+      { label: "Analyze",   range: [0.5, 1],   color: BLOOM_COLORS.Analyze.dot },
+      { label: "Evaluate",  range: [1, 1.5],   color: BLOOM_COLORS.Evaluate.dot },
+      { label: "Create",    range: [1.5, 3],   color: BLOOM_COLORS.Create.dot },
+    ];
+    const bCounts = buckets.map(b => ({
+      ...b,
+      count: state.questions.filter(q =>
+        q.difficulty != null && q.difficulty >= b.range[0] && q.difficulty < b.range[1]
+      ).length,
+    }));
+    const maxB = Math.max(...bCounts.map(b => b.count), 1);
+    const diffs = state.questions.map(q => q.difficulty).filter(d => d != null);
+    const avgDiff = diffs.length ? (diffs.reduce((a, b) => a + b, 0) / diffs.length).toFixed(2) : "—";
+    const minDiff = diffs.length ? Math.min(...diffs).toFixed(2) : "—";
+    const maxDiff = diffs.length ? Math.max(...diffs).toFixed(2) : "—";
+
+    // Bloom coverage of questions
+    const qBloomCount = {};
+    state.questions.forEach(q => { qBloomCount[q.bloomLevel] = (qBloomCount[q.bloomLevel] || 0) + 1; });
+
+    // Type distribution
+    const typeCount = {};
+    state.questions.forEach(q => { typeCount[q.type] = (typeCount[q.type] || 0) + 1; });
+    const typeHTML = Object.entries(typeCount).map(([t, n]) =>
+      `<span style="background:#1e1b3a;color:#a78bfa;padding:2px 7px;border-radius:10px;font-size:11px">${t} ×${n}</span>`
+    ).join(" ");
+
+    const diffBarHTML = bCounts.map(b => {
+      if (!b.count) return "";
+      const pct = Math.round(b.count / maxB * 100);
+      return `<div class="bloom-bar-row">
+        <span class="bloom-bar-label" style="color:${b.color};font-size:11px">${b.label}</span>
+        <div class="bloom-bar-track"><div class="bloom-bar-fill" style="width:${pct}%;background:${b.color}"></div></div>
+        <span class="bloom-bar-count">${b.count}</span>
+      </div>`;
+    }).join("");
+
+    questionsHTML = `
+      <div style="border-top:1px solid var(--border);padding-top:16px">
+        <div class="stats-section-title">Questions · IRT Difficulty (b)</div>
+        <div style="display:flex;gap:12px;margin-bottom:10px;font-size:11px;color:var(--muted2)">
+          <span>avg <b style="color:var(--accent2)">${avgDiff}</b></span>
+          <span>min <b style="color:var(--accent2)">${minDiff}</b></span>
+          <span>max <b style="color:var(--accent2)">${maxDiff}</b></span>
+        </div>
+        ${diffBarHTML}
+        <div style="margin-top:12px">
+          <div class="stats-section-title">Question Types</div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px">${typeHTML}</div>
+        </div>
+      </div>`;
+  }
+
+  panel.innerHTML = `
+    <div>
+      <div class="stats-section-title">Bloom Distribution · ${graph.nodes.length} nodes</div>
+      ${bloomHTML}
+    </div>
+    <div>
+      <div class="stats-section-title">All Nodes by Importance</div>
+      ${importanceHTML}
+    </div>
+    ${questionsHTML}
+  `;
+}
+
+function closeGraphModal() {
+  document.getElementById("graph-modal").classList.remove("open");
+  document.body.style.overflow = "";
+}
+
+// Close on Escape
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeGraphModal(); });
+
+// ── Export ────────────────────────────────────────────────────────────────────
+function exportJSON() {
+  if (!state.questions.length) return;
+  const blob = new Blob([JSON.stringify({ knowledgeId: state.knowledgeId, questions: state.questions }, null, 2)], { type: "application/json" });
+  const a = Object.assign(document.createElement("a"), { href: URL.createObjectURL(blob), download: `kaqg-questions-${state.contentId || "export"}.json` });
+  a.click();
+}
+</script>
+</body>
+</html>
