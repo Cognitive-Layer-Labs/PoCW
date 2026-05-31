@@ -105,16 +105,17 @@ describe("IRT Engine (1PL Rasch)", () => {
       expect(state.responses.length).to.be.greaterThanOrEqual(3);
     });
 
-    it("converges (SE < 0.5) within 13 well-targeted items", () => {
+    it("converges (SE < 0.40) within 22 well-targeted items", () => {
       let state = createIRTState();
-      // All items at b = θ give maximum Fisher Information (I=0.25 each).
-      // With 13 items + N(0,1) prior: total I = 13*0.25 + 1 = 4.25 → SE ≈ 0.485
-      for (let i = 0; i < 13; i++) {
+      // All items at b = θ give maximum Fisher Information (I = 0.25 each).
+      // SE = 1/sqrt(n*0.25 + 1). For SE < 0.40: n ≥ 22.
+      // With 22 items + N(0,1) prior: total I = 22*0.25 + 1 = 6.5 → SE ≈ 0.392 < 0.40
+      for (let i = 0; i < 22; i++) {
         const b = state.theta; // optimal: b = θ exactly
         const correct = i % 2 === 0;
         state = updateAbility(state, b, correct, correct ? 70 : 30, "Apply");
       }
-      expect(state.se).to.be.lessThan(0.5);
+      expect(state.se).to.be.lessThan(0.40);
       expect(state.converged).to.be.true;
     });
 

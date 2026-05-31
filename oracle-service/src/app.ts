@@ -1,9 +1,11 @@
 import express, { Request, Response, NextFunction } from "express";
 import rateLimit from "express-rate-limit";
+import * as path from "path";
 import { PoCW } from "./sdk/index";
 import { VerifySession } from "./sdk/verify-session";
 import { PoCWError, PoCWErrorCode } from "./sdk/types";
 import { initSessionStore, saveSession, loadSession, deleteSession } from "./services/session-store";
+import { getFullGraph, isFalkorAvailable } from "./services/kg-store";
 
 const app = express();
 
@@ -21,6 +23,7 @@ app.use((req: Request, res: Response, next: NextFunction): void => {
 });
 
 app.use(express.json());
+app.use(express.static(path.join(__dirname, "..", "public")));
 
 // 3.4 — Rate limiting: 30 requests per minute per IP
 const limiter = rateLimit({
@@ -336,6 +339,29 @@ app.get("/api/verify/:sessionId/result", async (req: Request, res: Response) => 
     verifySessions.delete(sessionId);
     await deleteSession(sessionId);
     return res.json(result);
+  } catch (err) {
+    return sendError(res, err);
+  }
+});
+
+// ─── Graph Visualization ─────────────────────────────────────────────────────
+
+/**
+ * GET /api/graph/:knowledgeId
+ * Returns the knowledge graph (nodes + edges) for a content ID.
+ * Used by the graph visualization viewer.
+ */
+app.get("/api/graph/:knowledgeId", async (req: Request, res: Response) => {
+  if (!isFalkorAvailable()) {
+    return res.status(503).json({ error: "FalkorDB unavailable", code: "INVALID_CONFIG" });
+  }
+  const contentId = parseInt(req.params.knowledgeId, 10);
+  if (isNaN(contentId)) {
+    return res.status(400).json({ error: "knowledgeId must be a numeric content ID", code: "INVALID_CONFIG" });
+  }
+  try {
+    const graph = await getFullGraph(contentId);
+    return res.json(graph);
   } catch (err) {
     return sendError(res, err);
   }

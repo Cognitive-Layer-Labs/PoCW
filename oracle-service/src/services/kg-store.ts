@@ -323,6 +323,100 @@ export function __setGraphForTest(g: Graph): void {
   graph = g;
 }
 
+/**
+ * Return all concepts for a content with importance >= threshold.
+ * Always returns at least minCount nodes (top by importance) even if none
+ * meet the threshold — guarantees the mastery loop always has targets.
+ */
+export async function getImportantConcepts(
+  contentId: number,
+  threshold = 0.65,
+  minCount = 3
+): Promise<KGNode[]> {
+  if (!falkorAvailable) return [];
+  const g = await getGraph();
+
+  // All nodes ordered by importance desc
+  const result = await g.query<R>(
+    `MATCH (c:Concept {contentId: $contentId})
+     RETURN c ORDER BY c.importance DESC`,
+    { params: { contentId } }
+  );
+
+  const all: KGNode[] = (result.data ?? []).map((row) => {
+    const c = row.c.properties;
+    return { id: c.id, label: c.label, bloomLevel: c.bloomLevel, importance: c.importance };
+  });
+
+  const above = all.filter(n => n.importance >= threshold);
+  if (above.length >= minCount) return above;
+  // Floor: always return at least minCount
+  return all.slice(0, Math.max(minCount, above.length));
+}
+
+/**
+ * Fetch a specific concept node plus its directed edges and neighbor nodes.
+ * edgeDirection:
+ *   'direct'   — both incoming and outgoing (full 1-hop subgraph)
+ *   'incoming' — only edges arriving AT this concept (context / preconditions)
+ *   'outgoing' — only edges leaving FROM this concept (consequences / applications)
+ */
+export async function getConceptWithEdges(
+  contentId: number,
+  conceptId: string,
+  edgeDirection: 'direct' | 'incoming' | 'outgoing' = 'direct'
+): Promise<{ concept: KGNode | null; edges: KGEdge[]; neighborNodes: KGNode[] }> {
+  if (!falkorAvailable) return { concept: null, edges: [], neighborNodes: [] };
+  const g = await getGraph();
+
+  // Fetch the concept itself
+  const conceptResult = await g.query<R>(
+    `MATCH (c:Concept {contentId: $contentId, id: $id}) RETURN c`,
+    { params: { contentId, id: conceptId } }
+  );
+
+  if (!conceptResult.data?.length) return { concept: null, edges: [], neighborNodes: [] };
+  const cp = conceptResult.data[0].c.properties;
+  const concept: KGNode = { id: cp.id, label: cp.label, bloomLevel: cp.bloomLevel, importance: cp.importance };
+
+  const edges: KGEdge[] = [];
+  const neighborMap = new Map<string, KGNode>();
+
+  if (edgeDirection !== 'incoming') {
+    // Outgoing: concept → neighbor
+    const outRes = await g.query<R>(
+      `MATCH (a:Concept {contentId: $contentId, id: $id})-[r:RELATES_TO]->(b:Concept {contentId: $contentId})
+       RETURN b, r.type AS rel`,
+      { params: { contentId, id: conceptId } }
+    );
+    for (const row of outRes.data ?? []) {
+      const b = row.b.properties;
+      if (!neighborMap.has(b.id)) {
+        neighborMap.set(b.id, { id: b.id, label: b.label, bloomLevel: b.bloomLevel, importance: b.importance });
+      }
+      edges.push({ source: conceptId, target: b.id, relationship: row.rel });
+    }
+  }
+
+  if (edgeDirection !== 'outgoing') {
+    // Incoming: neighbor → concept
+    const inRes = await g.query<R>(
+      `MATCH (b:Concept {contentId: $contentId})-[r:RELATES_TO]->(a:Concept {contentId: $contentId, id: $id})
+       RETURN b, r.type AS rel`,
+      { params: { contentId, id: conceptId } }
+    );
+    for (const row of inRes.data ?? []) {
+      const b = row.b.properties;
+      if (!neighborMap.has(b.id)) {
+        neighborMap.set(b.id, { id: b.id, label: b.label, bloomLevel: b.bloomLevel, importance: b.importance });
+      }
+      edges.push({ source: b.id, target: conceptId, relationship: row.rel });
+    }
+  }
+
+  return { concept, edges, neighborNodes: [...neighborMap.values()] };
+}
+
 /** For testing: override getConceptsByDifficulty */
 let _getConceptsByDifficultyOverride: typeof getConceptsByDifficulty | null = null;
 

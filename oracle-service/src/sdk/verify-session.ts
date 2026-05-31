@@ -156,11 +156,6 @@ export class VerifySession {
       });
     }
 
-    console.log(`[Session] Loaded ${importantNodes.length} important concept(s):`);
-    for (const node of importantNodes) {
-      console.log(`  · ${node.label} (id=${node.id}, importance=${node.importance.toFixed(2)})`);
-    }
-
     await this._generateNextQuestion();
   }
 
@@ -250,10 +245,6 @@ export class VerifySession {
           newStatus = 'failed';
         }
         this.conceptMastery.set(targetConceptId, { ...cm, status: newStatus, askCount: newAskCount });
-        console.log(
-          `[Mastery] "${cm.label}" ${cm.status} → ${newStatus}` +
-          ` (ask #${newAskCount}, ${gradeResult.correct ? "✓" : "✗"}, score=${gradeResult.score})`
-        );
       }
     }
 
@@ -299,23 +290,6 @@ export class VerifySession {
 
     const irtParams = { a, b_llm, b_pred: predictorParams?.b ?? null, b_used: b_combined, c, d, theta_before };
 
-    console.log(
-      `[IRT] Q${this.questionHistory.length} ${gradeResult.correct ? "✓" : "✗"}` +
-      `  b_llm=${b_llm.toFixed(3)} b_pred=${predictorParams ? predictorParams.b.toFixed(3) : "n/a"}` +
-      `  b_used=${b_combined.toFixed(3)}  a=${a.toFixed(3)}  c=${c}  d=${d.toFixed(3)}` +
-      `  bloom=${currentQ.bloomLevel}(w=${(BLOOM_WEIGHTS[currentQ.bloomLevel] ?? 0.5).toFixed(2)})` +
-      `  type=${currentQ.type}` +
-      `  → θ=${this.irtState.theta.toFixed(4)}  SE=${this.irtState.se.toFixed(4)}`
-    );
-
-    if (currentQ.type === "open" && gradeResult.dimensions) {
-      const dim = gradeResult.dimensions;
-      console.log(
-        `[Grade] open: ${dim.covered_points}/${dim.total_points} points covered` +
-        `  cap=${dim.precision_cap}  final=${gradeResult.score}`
-      );
-    }
-
     const questionNumber = this.questionHistory.length;
     const progress = {
       questionNumber,
@@ -331,12 +305,6 @@ export class VerifySession {
       || masteryComplete;
 
     if (isComplete) {
-      const stopReason = questionNumber >= this.config.max_questions
-        ? `max_questions=${this.config.max_questions}`
-        : this.irtState.converged
-          ? `IRT_converged (SE=${this.irtState.se.toFixed(4)})`
-          : `mastery_complete (SE=${this.irtState.se.toFixed(4)})`;
-      console.log(`[Session] Complete — reason: ${stopReason}  θ=${this.irtState.theta.toFixed(4)}  score=${thetaToScore(this.irtState.theta)}`);
       this._complete = true;
       this._currentQuestion = null;
     } else {

@@ -64,6 +64,22 @@ export async function extractKnowledgeGraph(
   return parseKGPayload(contentId, payload);
 }
 
+const NOISE_PATTERNS = [
+  /privacy\s*policy/i, /terms?\s*(of\s*)?(use|service)/i, /cookie/i,
+  /disclaimer/i, /copyright/i, /all\s*rights\s*reserved/i,
+  /financial\s*advice/i, /legal\s*advice/i, /medical\s*advice/i,
+  /not\s*(financial|investment|legal|medical)/i,
+  /wikipedia/i, /wikimedia/i,
+  /navigation/i, /sidebar/i, /external\s*links/i,
+  /retrieved\s*from/i, /categories?:/i, /see\s*also/i,
+  /advertisement/i, /sponsored/i,
+];
+
+function isSubstantiveNode(node: KGNode): boolean {
+  const label = node.label.toLowerCase();
+  return !NOISE_PATTERNS.some(p => p.test(label));
+}
+
 /**
  * Parse LLM response into a KnowledgeGraph structure.
  */
@@ -81,7 +97,8 @@ export function parseKGPayload(contentId: number, payload: string): KnowledgeGra
         label: String(n.label || n.name || `Concept ${i}`),
         bloomLevel: validBloomLevels.has(n.bloomLevel) ? n.bloomLevel : "Understand",
         importance: Math.max(1, Math.min(10, n.importance != null ? Number(n.importance) : 5))
-      }));
+      }))
+      .filter(isSubstantiveNode);
 
     const nodeIds = new Set(nodes.map(n => n.id));
 
@@ -96,8 +113,36 @@ export function parseKGPayload(contentId: number, payload: string): KnowledgeGra
         relationship: String(e.relationship || e.type || "related_to")
       }));
 
-    return { contentId, nodes, edges };
+    return { contentId, nodes: normalizeImportance(nodes, edges), edges };
   } catch {
     return { contentId, nodes: [], edges: [] };
   }
+}
+
+function normalizeImportance(nodes: KGNode[], edges: KGEdge[]): KGNode[] {
+  if (nodes.length === 0) return nodes;
+
+  const degree: Record<string, number> = {};
+  for (const n of nodes) degree[n.id] = 0;
+  for (const e of edges) {
+    if (e.source in degree) degree[e.source]++;
+    if (e.target in degree) degree[e.target]++;
+  }
+
+  const sortedByImp = [...nodes].sort((a, b) => a.importance - b.importance);
+  const impRank: Record<string, number> = {};
+  sortedByImp.forEach((n, i) => { impRank[n.id] = i; });
+
+  const sortedByDeg = [...nodes].sort((a, b) => (degree[a.id] || 0) - (degree[b.id] || 0));
+  const degRank: Record<string, number> = {};
+  sortedByDeg.forEach((n, i) => { degRank[n.id] = i; });
+
+  const maxRank = nodes.length - 1;
+
+  return nodes.map(n => {
+    const normImp = maxRank === 0 ? 0.5 : impRank[n.id] / maxRank;
+    const normDeg = maxRank === 0 ? 0.5 : degRank[n.id] / maxRank;
+    const combined = 0.6 * normImp + 0.4 * normDeg;
+    return { ...n, importance: Math.round(combined * 100) / 100 };
+  });
 }
