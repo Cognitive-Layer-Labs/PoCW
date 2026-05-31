@@ -6,13 +6,24 @@ kg-prompt: |
 
   INSTRUCTIONS:
   1. Identify 10-20 key concepts/entities from the MAIN SUBJECT MATTER of the content.
-  2. For each concept, determine its Bloom's Taxonomy cognitive level:
+  2. For each concept, determine its Bloom's Taxonomy cognitive level.
+     The level reflects the COGNITIVE COMPLEXITY required to understand and work with the concept
+     in this material — NOT keywords in the concept's name.
+
      - Remember: Basic facts, definitions, terminology
      - Understand: Explanations, summaries, interpretations
      - Apply: Using concepts in new situations, procedures
      - Analyze: Breaking down into components, finding relationships
      - Evaluate: Judging, critiquing, assessing trade-offs
      - Create: Synthesizing, designing, proposing novel ideas
+
+     CRITICAL: Do NOT assign Bloom level based on words in the concept name.
+     - "Generative AI" → Understand or Apply  (it's a technology domain, not a creative act)
+     - "Creating Modularisation" → Apply  (applying a design principle)
+     - "Machine Learning" → Apply or Analyze
+     - "Neural Network Architecture" → Analyze
+     - Reserve "Create" ONLY for concepts that are inherently about producing something new
+       that did not exist before: e.g. "Novel Algorithm Design", "Research Hypothesis Generation".
   3. Rate each concept's importance (1-10) based on how central it is to the MAIN TOPIC.
   4. Identify relationships between concepts.
 

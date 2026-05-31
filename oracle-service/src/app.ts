@@ -6,6 +6,7 @@ import { VerifySession } from "./sdk/verify-session";
 import { PoCWError, PoCWErrorCode } from "./sdk/types";
 import { initSessionStore, saveSession, loadSession, deleteSession } from "./services/session-store";
 import { getFullGraph, isFalkorAvailable } from "./services/kg-store";
+import { mintKAL } from "./services/kal-minter";
 
 const app = express();
 
@@ -338,6 +339,12 @@ app.get("/api/verify/:sessionId/result", async (req: Request, res: Response) => 
     const result = await session.getResult();
     verifySessions.delete(sessionId);
     await deleteSession(sessionId);
+    // Mint KAL if the session passed and oracle is configured with RPC_URL + KAL_ADDRESS
+    if (result.competenceIndicator && result.kalAmount && result.kalAmount > 0) {
+      mintKAL(result.subject, result.kalAmount).catch(err =>
+        console.warn("[KAL] mint failed:", (err as Error)?.message)
+      );
+    }
     return res.json(result);
   } catch (err) {
     return sendError(res, err);

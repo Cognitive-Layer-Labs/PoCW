@@ -64,6 +64,21 @@ export async function extractKnowledgeGraph(
   return parseKGPayload(contentId, payload);
 }
 
+// Technology/domain terms that are often mis-labelled "Create" by the LLM because
+// their name contains words like "generative", "building", "creating", "designing".
+// These are knowledge topics — their Bloom level should reflect how hard they are to
+// understand and apply, not what they sound like.
+const TECH_CONCEPT_PATTERN =
+  /\b(AI|ML|API|neural|deep|learning|intelligence|model|algorithm|framework|architecture|system|network|platform|service|library|pattern|module|component|cloud|protocol|pipeline|infrastructure|database|microservice|container|orchestrat|deployment|generative|modular|modulariz)\w*/i;
+
+function sanitizeBloomLevel(node: KGNode): KGNode {
+  if (node.bloomLevel !== "Create") return node;
+  if (TECH_CONCEPT_PATTERN.test(node.label)) {
+    return { ...node, bloomLevel: "Apply" };
+  }
+  return node;
+}
+
 const NOISE_PATTERNS = [
   /privacy\s*policy/i, /terms?\s*(of\s*)?(use|service)/i, /cookie/i,
   /disclaimer/i, /copyright/i, /all\s*rights\s*reserved/i,
@@ -98,6 +113,7 @@ export function parseKGPayload(contentId: number, payload: string): KnowledgeGra
         bloomLevel: validBloomLevels.has(n.bloomLevel) ? n.bloomLevel : "Understand",
         importance: Math.max(1, Math.min(10, n.importance != null ? Number(n.importance) : 5))
       }))
+      .map(sanitizeBloomLevel)
       .filter(isSubstantiveNode);
 
     const nodeIds = new Set(nodes.map(n => n.id));

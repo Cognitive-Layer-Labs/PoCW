@@ -80,6 +80,15 @@ async function main() {
   await tx.wait();
   console.log("Transferred SBT ownership to controller");
 
+  // Deploy KAL ERC-20 — oracle wallet is owner (minter)
+  const KAL = await hre.ethers.getContractFactory("KAL");
+  const kal = await withNonceRetry("KAL.deploy", async (nonce) =>
+    KAL.deploy({ nonce })
+  );
+  await kal.waitForDeployment();
+  const kalAddress = await kal.getAddress();
+  console.log(`KAL deployed at ${kalAddress}`);
+
   // Write deployment record for frontend + oracle config
   const deploymentsDir = path.resolve(__dirname, "..", "deployments");
   fs.mkdirSync(deploymentsDir, { recursive: true });
@@ -89,6 +98,7 @@ async function main() {
     network: networkName,
     controllerAddress,
     sbtAddress,
+    kalAddress,
     oracleAddress,
     strictSender,
     deployedAt: new Date().toISOString(),

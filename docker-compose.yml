@@ -61,6 +61,8 @@ services:
       - FALKORDB_PORT=6379
       - REDIS_URL=redis://redis:6379/1
       - PREDICTOR_URL=http://predictor:3001
+      - RPC_URL=${RPC_URL:-}
+      - KAL_ADDRESS=${KAL_ADDRESS:-}
     volumes:
       - oracle_data:/app/data
     healthcheck:

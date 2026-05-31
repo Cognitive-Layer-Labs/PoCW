@@ -17,6 +17,13 @@ export interface ChainConfig {
 export interface PoCWConfig {
   /** Maximum questions before session ends. Default: 10 */
   max_questions?: number;
+  /**
+   * Difficulty preset. Overrides `difficulty` and `threshold`.
+   *   easy   → difficulty 0.2, threshold 0.35  (good for general audiences)
+   *   medium → difficulty 0.4, threshold 0.50
+   *   hard   → difficulty 0.65, threshold 0.65
+   */
+  difficulty_preset?: "easy" | "medium" | "hard";
   /** Starting difficulty 0-1. Default: 0.5. Maps to IRT b = (val*6)-3 */
   difficulty?: number;
   /** Question types to use. Default: ["open"] */
@@ -64,12 +71,19 @@ export interface ResolvedConfig {
   persona?: string;
 }
 
+const DIFFICULTY_PRESETS: Record<string, { difficulty: number; threshold: number }> = {
+  easy:   { difficulty: 0.20, threshold: 0.35 },
+  medium: { difficulty: 0.40, threshold: 0.50 },
+  hard:   { difficulty: 0.65, threshold: 0.65 },
+};
+
 export function resolveConfig(config?: PoCWConfig): ResolvedConfig {
+  const preset = config?.difficulty_preset ? DIFFICULTY_PRESETS[config.difficulty_preset] : null;
   return {
     max_questions: config?.max_questions ?? DEFAULT_CONFIG.max_questions,
-    difficulty: config?.difficulty ?? DEFAULT_CONFIG.difficulty,
+    difficulty: preset?.difficulty ?? config?.difficulty ?? DEFAULT_CONFIG.difficulty,
     q_types: config?.q_types ?? DEFAULT_CONFIG.q_types,
-    threshold: config?.threshold ?? DEFAULT_CONFIG.threshold,
+    threshold: preset?.threshold ?? config?.threshold ?? DEFAULT_CONFIG.threshold,
     response: config?.response ?? DEFAULT_CONFIG.response,
     model: config?.model,
     attest: config?.attest ?? DEFAULT_CONFIG.attest,
@@ -252,6 +266,11 @@ export interface PoCWResult {
   timestamp: string;
   /** Base64 data URI of the ERC-1155 metadata (present when attestation type is onchain/offchain) */
   tokenUri?: string;
+  /**
+   * KAL tokens earned for this session (in token units, e.g. 73.5).
+   * Only present when the session passed. Multiply by 1e18 for wei when calling KAL.mint.
+   */
+  kalAmount?: number;
   /** Disclaimer text explaining the heuristic nature of the measurements */
   disclaimers: PoCWDisclaimers;
 }

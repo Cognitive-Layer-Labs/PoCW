@@ -419,6 +419,8 @@ export class VerifySession {
       }));
     }
 
+    const kalAmount = passed ? calculateKAL(cognitiveProfile.scoreBreakdown) : undefined;
+
     return {
       competenceIndicator,
       score,
@@ -434,6 +436,7 @@ export class VerifySession {
       subject: this.subject,
       timestamp,
       tokenUri,
+      kalAmount,
       disclaimers: POCW_DISCLAIMERS,
     };
   }
@@ -501,4 +504,25 @@ export class VerifySession {
   rehydrateChunks(chunks: string[]): void {
     (this as any).chunks = chunks;
   }
+}
+
+// ─── KAL calculation ─────────────────────────────────────────────────────────
+
+const BASE_KAL = 100;
+const DEFAULT_M  = 1.0;
+
+function calculateKAL(
+  breakdown: Array<{ score: number; bloomLevel: string }>,
+  M: number = DEFAULT_M
+): number {
+  let numerator   = 0;
+  let denominator = 0;
+  for (const q of breakdown) {
+    const w = BLOOM_WEIGHTS[q.bloomLevel] ?? 0.25;
+    numerator   += q.score * w;
+    denominator += 100    * w;
+  }
+  if (denominator === 0) return 0;
+  const normalised = numerator / denominator;
+  return Math.round(BASE_KAL * M * normalised * 100) / 100;
 }

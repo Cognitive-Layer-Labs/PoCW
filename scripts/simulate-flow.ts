@@ -220,7 +220,7 @@ async function main() {
     }
   }
 
-  /* ── Step 3: Mint SBT ── */
+  /* ── Step 3: Mint SBT + KAL ── */
   if (result.attestation?.type === "onchain") {
     console.log("\n=== MINTING SBT ===");
     const att = result.attestation;
@@ -240,6 +240,43 @@ async function main() {
 
     const balance = await sbt.balanceOf(userAddress, att.contentId);
     console.log("SBT balance:", balance.toString());
+
+    // Mint KAL
+    if (result.kalAmount && result.kalAmount > 0) {
+      console.log(`\n=== MINTING KAL: ${result.kalAmount} KAL ===`);
+      const { ethers } = hre;
+      const KAL_ABI = ["function mint(address to, uint256 amount) external"];
+
+      // Read kalAddress from deployments record (set during deploy)
+      let kalAddress: string | undefined;
+      if (networkName !== "localhost" && networkName !== "hardhat") {
+        const recordPath = path.resolve(__dirname, "..", "deployments", `${networkName}.json`);
+        if (fs.existsSync(recordPath)) {
+          kalAddress = JSON.parse(fs.readFileSync(recordPath, "utf8")).kalAddress;
+        }
+      } else {
+        // Local: deploy fresh KAL owned by the oracle signer
+        const oracle = signers[1];
+        const KAL = await ethers.getContractFactory("KAL", oracle);
+        const kalContract = await KAL.deploy();
+        await kalContract.waitForDeployment();
+        kalAddress = await kalContract.getAddress();
+        console.log("KAL deployed at:", kalAddress);
+      }
+
+      if (kalAddress) {
+        const oracle    = networkName === "localhost" || networkName === "hardhat" ? signers[1] : signers[0];
+        const kal       = new ethers.Contract(kalAddress, KAL_ABI, oracle);
+        const amountWei = ethers.parseEther(result.kalAmount.toFixed(18));
+        await (kal.mint as any)(userAddress, amountWei);
+        const kalContract = await ethers.getContractAt(
+          ["function balanceOf(address) view returns (uint256)"],
+          kalAddress
+        );
+        const kalBalance = await (kalContract.balanceOf as any)(userAddress);
+        console.log("KAL balance:", ethers.formatEther(kalBalance), "KAL");
+      }
+    }
   }
 
   await pocw.close();
