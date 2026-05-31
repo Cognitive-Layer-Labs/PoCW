@@ -62,6 +62,7 @@ services:
       predictor:
         condition: service_healthy
     environment:
+      - NODE_ENV=production
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
       - ORACLE_PRIVATE_KEY=${ORACLE_PRIVATE_KEY}
       - CORS_ORIGIN=${CORS_ORIGIN}

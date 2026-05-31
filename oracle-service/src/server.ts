@@ -15,6 +15,12 @@ function isSqliteCantOpen(err: unknown): boolean {
 }
 
 async function start() {
+  // In production, require an API key to protect all /api routes.
+  if (process.env.NODE_ENV === "production" && !process.env.POCW_API_KEY) {
+    console.error("[oracle] POCW_API_KEY must be set in production. Refusing to start.");
+    process.exit(1);
+  }
+
   let pocw = new PoCW({ dbPath: PRIMARY_DB_PATH });
   try {
     await pocw.init();

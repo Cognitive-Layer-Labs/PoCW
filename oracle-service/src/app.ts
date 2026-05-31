@@ -36,12 +36,13 @@ const limiter = rateLimit({
 });
 app.use(limiter);
 
-// 3.4 — Optional API key authentication via POCW_API_KEY env var.
-// If the variable is not set, the check is disabled (open mode).
+// API key auth — required in production, optional in local dev.
+// Set POCW_API_KEY in .env to protect all /api routes.
+// If NODE_ENV=production and POCW_API_KEY is unset, the server will refuse to start (see server.ts).
 const API_KEY = process.env.POCW_API_KEY;
 function requireApiKey(req: Request, res: Response, next: NextFunction): void {
   if (!API_KEY) {
-    next();
+    next(); // open mode — local dev only
     return;
   }
   const auth = req.headers.authorization;
