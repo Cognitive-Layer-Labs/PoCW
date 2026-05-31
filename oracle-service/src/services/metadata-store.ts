@@ -55,72 +55,7 @@ export interface UploadResult {
 
 const DATA_DIR = path.resolve(__dirname, "..", "..", "data", "profiles");
 
-// ─── SVG badge ───────────────────────────────────────────────────────────────
-
-const BLOOM_ORDER = ["Remember", "Understand", "Apply", "Analyze", "Evaluate", "Create"];
-const SCORE_COLORS: Array<[number, string]> = [
-  [80, "#22c55e"],  // green
-  [50, "#a78bfa"],  // purple
-  [0,  "#ef4444"],  // red
-];
-
-function scoreColor(score: number): string {
-  return (SCORE_COLORS.find(([min]) => score >= min) ?? SCORE_COLORS[2])[1];
-}
-
-function truncate(s: string, max: number): string {
-  return s.length <= max ? s : s.slice(0, max - 1) + "…";
-}
-
-function buildTokenSvg(profile: CognitiveProfile): string {
-  const color   = scoreColor(profile.score);
-  const label   = profile.passed ? "PASSED" : "FAILED";
-  const bloom   = profile.bloomLevelsReached.length > 0
-    ? profile.bloomLevelsReached[profile.bloomLevelsReached.length - 1]
-    : "—";
-  const title   = truncate(profile.title || `Content #${profile.contentId}`, 28);
-
-  // Bloom progress bar — filled segments
-  const bloomIdx  = BLOOM_ORDER.indexOf(bloom);
-  const barWidth  = 140;
-  const segW      = Math.floor(barWidth / BLOOM_ORDER.length) - 2;
-  const bars = BLOOM_ORDER.map((_, i) => {
-    const x = 30 + i * (segW + 2);
-    const fill = i <= bloomIdx ? color : "#1e1b4b";
-    return `<rect x="${x}" y="158" width="${segW}" height="5" rx="2" fill="${fill}"/>`;
-  }).join("");
-
-  return [
-    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">',
-    '<rect width="200" height="200" rx="14" fill="#0c0c12"/>',
-    '<rect x="1" y="1" width="198" height="198" rx="13" fill="none" stroke="#1e1b4b" stroke-width="1"/>',
-
-    // Header
-    `<text x="100" y="26" text-anchor="middle" font-family="monospace" font-size="11" fill="#7c3aed" font-weight="bold" letter-spacing="2">PoCW</text>`,
-
-    // Score circle
-    `<circle cx="100" cy="85" r="42" fill="none" stroke="${color}" stroke-width="2.5" opacity="0.3"/>`,
-    `<circle cx="100" cy="85" r="36" fill="#0f0f1a"/>`,
-    `<text x="100" y="80" text-anchor="middle" font-family="monospace" font-size="26" font-weight="bold" fill="${color}">${profile.score}</text>`,
-    `<text x="100" y="96" text-anchor="middle" font-family="monospace" font-size="9" fill="#64748b">/100</text>`,
-
-    // Pass/fail badge
-    `<rect x="68" y="108" width="64" height="16" rx="8" fill="${profile.passed ? "#14532d" : "#450a0a"}"/>`,
-    `<text x="100" y="120" text-anchor="middle" font-family="monospace" font-size="9" font-weight="bold" fill="${color}">${label}</text>`,
-
-    // Title
-    `<text x="100" y="142" text-anchor="middle" font-family="monospace" font-size="8" fill="#94a3b8">${title}</text>`,
-
-    // Bloom bar
-    `<text x="30" y="155" font-family="monospace" font-size="7" fill="#3b3b5c">bloom: ${bloom}</text>`,
-    bars,
-
-    // θ / SE footer
-    `<text x="30" y="185" font-family="monospace" font-size="7" fill="#3b3b5c">θ=${profile.theta.toFixed(2)}  SE=${profile.se.toFixed(2)}  Q=${profile.questionCount}</text>`,
-
-    '</svg>',
-  ].join("");
-}
+const TOKEN_IMAGE_URL = "https://cognitive-layer-labs.github.io/PoCW/cat.jpeg";
 
 // ─── ERC-1155 metadata ───────────────────────────────────────────────────────
 
@@ -132,13 +67,10 @@ export function buildErc1155Metadata(profile: CognitiveProfile): Erc1155Metadata
     ? profile.bloomLevelsReached[profile.bloomLevelsReached.length - 1]
     : "Remember";
 
-  const svg = buildTokenSvg(profile);
-  const image = `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`;
-
   return {
-    name: profile.title || `PoCW #${profile.contentId}`,
+    name: "Proof of Cognitive Work",
     description: `Demonstrated knowledge of "${profile.title || `content #${profile.contentId}`}". Score: ${profile.score}/100. Highest Bloom level: ${highestBloom}. Issued by PoCW oracle ${profile.oracleAddress}.`,
-    image,
+    image: TOKEN_IMAGE_URL,
     attributes: [
       { trait_type: "Score", value: profile.score },
       { trait_type: "Theta", value: Number(profile.theta.toFixed(3)) },
