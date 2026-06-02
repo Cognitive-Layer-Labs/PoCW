@@ -1,7 +1,7 @@
 /**
  * IRT Predictor Client
  *
- * Calls the Python predictor sidecar (predictor_service.py) to get 4PL
+ * Calls the Python predictor sidecar (predictor_service.py) to get 2PL
  * IRT parameters for a generated question.
  *
  * Falls back gracefully (returns null) when the sidecar is unavailable —

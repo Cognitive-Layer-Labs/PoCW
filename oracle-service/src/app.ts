@@ -7,6 +7,7 @@ import { PoCWError, PoCWErrorCode } from "./sdk/types";
 import { initSessionStore, saveSession, loadSession, deleteSession } from "./services/session-store";
 import { getFullGraph, isFalkorAvailable } from "./services/kg-store";
 import { mintKAL } from "./services/kal-minter";
+import { getContent, updateMetadata } from "./sdk/content-store";
 
 const app = express();
 
@@ -231,9 +232,14 @@ app.get("/api/index", (req: Request, res: Response) => {
 app.get("/api/index/:knowledgeId", (req: Request, res: Response) => {
   try {
     const result = getPoCW().getIndexStatus(req.params.knowledgeId);
+    const row = getContent(req.params.knowledgeId);
     const status = result.status === "ready" ? 200 : 202;
     if (status === 202) res.set("Retry-After", "5");
-    return res.status(status).json(result);
+    return res.status(status).json({
+      ...result,
+      title: row?.title ?? undefined,
+      source: row?.source ?? undefined,
+    });
   } catch (err) {
     return sendError(res, err);
   }
@@ -263,6 +269,8 @@ app.post("/api/verify", async (req: Request, res: Response) => {
     return res.json({
       sessionId: session.sessionId,
       question: session.currentQuestion,
+      importantConceptCount: session.importantConceptCount,
+      maxQuestions: session.maxQuestions,
     });
   } catch (err) {
     return sendError(res, err);
@@ -294,7 +302,7 @@ app.post("/api/verify/:sessionId/answer", async (req: Request, res: Response) =>
     }
     // Rehydrate chunks from contentCache
     const pocw = getPoCW();
-    const row = (pocw as any).getContent?.(session.knowledgeId);
+    const row = getContent(session.knowledgeId);
     if (row?.source) {
       const { chunks } = await (pocw as any).getContentChunks(session.knowledgeId, row.source);
       session.rehydrateChunks(chunks);
@@ -328,7 +336,7 @@ app.get("/api/verify/:sessionId/result", async (req: Request, res: Response) => 
       return res.status(404).json({ error: "Session not found", code: "CONTENT_NOT_FOUND" });
     }
     const pocw = getPoCW();
-    const row = (pocw as any).getContent?.(session.knowledgeId);
+    const row = getContent(session.knowledgeId);
     if (row?.source) {
       const { chunks } = await (pocw as any).getContentChunks(session.knowledgeId, row.source);
       session.rehydrateChunks(chunks);
@@ -352,6 +360,43 @@ app.get("/api/verify/:sessionId/result", async (req: Request, res: Response) => 
   }
 });
 
+/**
+ * PATCH /api/index/:knowledgeId/title
+ * Re-fetch the real title for a YouTube entry (or accept a custom title in body).
+ * Body (optional): { title: string }
+ */
+app.patch("/api/index/:knowledgeId/title", async (req: Request, res: Response) => {
+  const row = getContent(req.params.knowledgeId);
+  if (!row) {
+    return res.status(404).json({ error: "Content not found", code: "CONTENT_NOT_FOUND" });
+  }
+
+  let title: string | undefined = req.body?.title;
+
+  if (!title) {
+    const ytMatch = row.source.match(/(?:v=|\/)([0-9A-Za-z_-]{11})/);
+    if (ytMatch) {
+      try {
+        const oembed = await fetch(
+          `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${ytMatch[1]}&format=json`,
+          { signal: AbortSignal.timeout(5000) }
+        );
+        if (oembed.ok) {
+          const data = await oembed.json() as { title?: string };
+          title = data.title;
+        }
+      } catch { /* fall through */ }
+    }
+  }
+
+  if (!title) {
+    return res.status(400).json({ error: "Could not resolve title — provide one in body: { title }", code: "INVALID_CONFIG" });
+  }
+
+  await updateMetadata(row.knowledge_id, title, row.description ?? "");
+  return res.json({ knowledgeId: row.knowledge_id, title });
+});
+
 // ─── Graph Visualization ─────────────────────────────────────────────────────
 
 /**
@@ -363,10 +408,21 @@ app.get("/api/graph/:knowledgeId", async (req: Request, res: Response) => {
   if (!isFalkorAvailable()) {
     return res.status(503).json({ error: "FalkorDB unavailable", code: "INVALID_CONFIG" });
   }
-  const contentId = parseInt(req.params.knowledgeId, 10);
-  if (isNaN(contentId)) {
-    return res.status(400).json({ error: "knowledgeId must be a numeric content ID", code: "INVALID_CONFIG" });
+
+  // Accept either the string knowledgeId (primary key) or a legacy numeric contentId.
+  let contentId: number;
+  const param = req.params.knowledgeId;
+  const numeric = parseInt(param, 10);
+  if (!isNaN(numeric) && String(numeric) === param) {
+    contentId = numeric;
+  } else {
+    const row = getContent(param);
+    if (!row || row.content_id == null) {
+      return res.status(404).json({ error: "Content not found", code: "CONTENT_NOT_FOUND" });
+    }
+    contentId = row.content_id;
   }
+
   try {
     const graph = await getFullGraph(contentId);
     return res.json(graph);

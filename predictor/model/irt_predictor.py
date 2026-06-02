@@ -17,12 +17,12 @@ from pathlib import Path
 
 class IRTPredictor:
     """
-    Predictor IRT 4PL din text.
+    Predictor IRT 2PL din text.
     Parametri returnați:
       a  — discrimination: cât de bine separă cei care știu de cei care nu știu
-      b  — difficulty: pragul theta la care P(corect) = (c+d)/2
-      c  — guessing: probabilitate de răspuns corect la abilitate -∞ (lower asymptote)
-      d  — upper asymptote: probabilitate maximă de răspuns corect
+      b  — difficulty: pragul theta la care P(corect) = 0.5 (2PL: c=0, d=1)
+      c  — guessing: deterministic din tipul întrebării (mc=0.25, tf=0.5, open=0)
+      d  — upper asymptote: constant 1.0 (fix 2PL)
     """
 
     def __init__(self, model_dir: str = "."):

@@ -89,6 +89,13 @@ async function main() {
   const kalAddress = await kal.getAddress();
   console.log(`KAL deployed at ${kalAddress}`);
 
+  // Transfer KAL ownership to oracle wallet so it can call mint()
+  const kalOwnerTx = await withNonceRetry("KAL.transferOwnership", async (nonce) =>
+    kal.transferOwnership(oracleAddress, { nonce })
+  );
+  await kalOwnerTx.wait();
+  console.log(`KAL ownership transferred to oracle (${oracleAddress})`);
+
   // Write deployment record for frontend + oracle config
   const deploymentsDir = path.resolve(__dirname, "..", "deployments");
   fs.mkdirSync(deploymentsDir, { recursive: true });

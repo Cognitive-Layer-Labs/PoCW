@@ -27,10 +27,12 @@ export interface CognitiveProfile {
   oracleAddress: string;
   scoreBreakdown: Array<{
     question: string;
+    userAnswer: string;
     score: number;
     difficulty: number;
     bloomLevel: string;
     correct: boolean;
+    reasoning: string;
   }>;
   contentUrl: string;
   contentId: number;

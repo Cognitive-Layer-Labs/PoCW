@@ -60,9 +60,12 @@ export const DEFAULT_CONFIG: Required<
 /** Internal resolved config with defaults applied */
 export interface ResolvedConfig {
   max_questions: number;
+  /** Hard ceiling on dynamic question expansion (always >= max_questions). */
+  cap_questions: number;
   difficulty: number;
   q_types: QuestionType[];
   threshold: number;
+  importance_threshold: number;
   response: "boolean" | "score" | "detailed";
   model?: string;
   attest: "onchain" | "offchain" | "none";
@@ -71,19 +74,28 @@ export interface ResolvedConfig {
   persona?: string;
 }
 
-const DIFFICULTY_PRESETS: Record<string, { difficulty: number; threshold: number }> = {
-  easy:   { difficulty: 0.20, threshold: 0.35 },
-  medium: { difficulty: 0.40, threshold: 0.50 },
-  hard:   { difficulty: 0.65, threshold: 0.65 },
+const DIFFICULTY_PRESETS: Record<string, {
+  difficulty: number;
+  threshold: number;
+  importance_threshold: number;
+  max_questions: number;
+  cap_questions: number;
+}> = {
+  easy:   { difficulty: 0.20, threshold: 0.35, importance_threshold: 0.80, max_questions: 10, cap_questions: 15 },
+  medium: { difficulty: 0.40, threshold: 0.50, importance_threshold: 0.65, max_questions: 15, cap_questions: 25 },
+  hard:   { difficulty: 0.65, threshold: 0.65, importance_threshold: 0.50, max_questions: 20, cap_questions: 40 },
 };
 
 export function resolveConfig(config?: PoCWConfig): ResolvedConfig {
   const preset = config?.difficulty_preset ? DIFFICULTY_PRESETS[config.difficulty_preset] : null;
+  const max_q = preset?.max_questions ?? config?.max_questions ?? DEFAULT_CONFIG.max_questions;
   return {
-    max_questions: config?.max_questions ?? DEFAULT_CONFIG.max_questions,
+    max_questions: max_q,
+    cap_questions: preset?.cap_questions ?? max_q * 2,
     difficulty: preset?.difficulty ?? config?.difficulty ?? DEFAULT_CONFIG.difficulty,
     q_types: config?.q_types ?? DEFAULT_CONFIG.q_types,
     threshold: preset?.threshold ?? config?.threshold ?? DEFAULT_CONFIG.threshold,
+    importance_threshold: preset?.importance_threshold ?? 0.65,
     response: config?.response ?? DEFAULT_CONFIG.response,
     model: config?.model,
     attest: config?.attest ?? DEFAULT_CONFIG.attest,
@@ -171,6 +183,8 @@ export interface AnswerFeedback {
   };
   /** Reference key points for open questions (from question generation). */
   referenceKeyPoints?: string[];
+  /** Correct answer text for MCQ / true_false questions. */
+  correctAnswer?: string;
   progress: {
     questionNumber: number;
     theta: number;

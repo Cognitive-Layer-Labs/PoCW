@@ -110,6 +110,8 @@ export class VerifySession {
 
   private irtState: IRTState;
   private conceptMastery: ConceptMasteryMap = new Map();
+  /** Effective max questions — raised to importantConceptCount after init(). */
+  private _maxQuestions: number;
   private bloomCoverage: BloomCoverage = {}; // kept for snapshot compat
   private questionHistory: QuestionEntry[] = [];
   private _currentQuestion: GeneratedQuestion | null = null;
@@ -130,6 +132,7 @@ export class VerifySession {
     this.knowledgeId = knowledgeId;
     this.subject = subject;
     this.config = config;
+    this._maxQuestions = config.max_questions;
     this.chunks = chunks;
     this.chunkUsageCount = new Array(chunks.length).fill(0);
     this.irtState = createIRTState();
@@ -144,7 +147,7 @@ export class VerifySession {
   async init(): Promise<void> {
     // Load important concepts for the mastery loop
     const importantNodes = await getImportantConcepts(
-      this.contentId, IMPORTANT_CONCEPT_THRESHOLD, MIN_IMPORTANT_CONCEPTS
+      this.contentId, this.config.importance_threshold, MIN_IMPORTANT_CONCEPTS
     );
     for (const node of importantNodes) {
       this.conceptMastery.set(node.id, {
@@ -155,6 +158,12 @@ export class VerifySession {
         askCount: 0,
       });
     }
+
+    // Expand to cover all important concepts, but never exceed the preset cap
+    this._maxQuestions = Math.min(
+      Math.max(this._maxQuestions, importantNodes.length),
+      this.config.cap_questions,
+    );
 
     await this._generateNextQuestion();
   }
@@ -194,6 +203,9 @@ export class VerifySession {
   }
 
   /** Get the current question formatted for the caller. */
+  get importantConceptCount(): number { return this.conceptMastery.size; }
+  get maxQuestions(): number { return this._maxQuestions; }
+
   get currentQuestion(): VerifyQuestion {
     if (!this._currentQuestion) {
       throw new PoCWError("SESSION_NOT_ACTIVE", "No current question — session may be complete");
@@ -205,7 +217,7 @@ export class VerifySession {
       type: q.type,
       bloomLevel: q.bloomLevel,
       difficulty: q.difficulty,
-      totalQuestions: this.config.max_questions,
+      totalQuestions: this._maxQuestions,
       options: q.options,
     };
   }
@@ -266,7 +278,7 @@ export class VerifySession {
     const bl = currentQ.bloomLevel;
     this.bloomCoverage[bl] = (this.bloomCoverage[bl] ?? 0) + 1;
 
-    // 4PL IRT update: combine LLM b with predictor b, use predictor a and d
+    // IRT update (2PL): combine LLM b with predictor b, use predictor a; d fixed by 2PL
     const qIndex = this.questionHistory.length - 1;
     const b_llm = this.targetDifficulties[qIndex] ?? 0;
     const c = questionTypeC(currentQ.type);
@@ -300,7 +312,7 @@ export class VerifySession {
 
     // Stopping conditions
     const masteryComplete = isConceptMasteryComplete(this.conceptMastery, this.irtState.se);
-    const isComplete = questionNumber >= this.config.max_questions
+    const isComplete = questionNumber >= this._maxQuestions
       || this.irtState.converged
       || masteryComplete;
 
@@ -318,6 +330,7 @@ export class VerifySession {
       dimensions: gradeResult.dimensions,
       irtParams,
       referenceKeyPoints: currentQ.type === "open" ? currentQ.referenceKeyPoints : undefined,
+      correctAnswer: (currentQ.type === "mcq" || currentQ.type === "true_false") ? currentQ.correctAnswer : undefined,
       progress,
       isComplete,
     };
@@ -372,10 +385,12 @@ export class VerifySession {
       oracleAddress: getOracleAddress(),
       scoreBreakdown: this.questionHistory.map(q => ({
         question: q.question,
+        userAnswer: q.userAnswer ?? "",
         score: q.score || 0,
         difficulty: q.difficulty,
         bloomLevel: q.bloomLevel,
         correct: q.correct || false,
+        reasoning: q.reasoning ?? "",
       })),
       contentUrl: this.knowledgeId,
       contentId: this.contentId,

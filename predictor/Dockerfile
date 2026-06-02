@@ -13,7 +13,7 @@ RUN pip install --no-cache-dir -r requirements-inference.txt
 # starts with no internet access at runtime.
 RUN python3 -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-small-en-v1.5')"
 
-# Bake the 4PL IRT model artifacts into the image.
+# Bake the 2PL IRT model artifacts into the image.
 # model/ must contain: xgb_regressors.pkl  irt_predictor.py
 # To update the model, replace those files and rebuild.
 COPY model ./model

@@ -332,7 +332,7 @@ class PoCW {
       contentCache.set(knowledgeId, { text, chunks });
 
       // Extract title/description from text
-      const { title, description } = extractMetadata(source, text);
+      const { title, description } = await extractMetadata(source, text);
       await updateMetadata(knowledgeId, title, description);
 
       await markReady(knowledgeId, contentHash, chunks.length);
@@ -410,14 +410,24 @@ function detectContentType(source: string): string {
  * For raw text, the first non-empty line becomes the title and
  * the first ~200 chars become the description.
  */
-function extractMetadata(source: string, text: string): { title: string; description: string } {
-  // Try to extract YouTube video ID as a hint
+async function extractMetadata(source: string, text: string): Promise<{ title: string; description: string }> {
+  // YouTube: fetch real title via oEmbed (no API key required)
   const ytMatch = source.match(/(?:v=|\/)([0-9A-Za-z_-]{11})/);
   if (ytMatch) {
-    return {
-      title: `YouTube video ${ytMatch[1]}`,
-      description: text.slice(0, 200).trim(),
-    };
+    const videoId = ytMatch[1];
+    try {
+      const oembedUrl = `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`;
+      const res = await fetch(oembedUrl, { signal: AbortSignal.timeout(5000) });
+      if (res.ok) {
+        const data = await res.json() as { title?: string; author_name?: string };
+        if (data.title) {
+          return { title: data.title, description: text.slice(0, 200).trim() };
+        }
+      }
+    } catch {
+      // oEmbed unavailable — fall through to video ID fallback
+    }
+    return { title: `YouTube video ${videoId}`, description: text.slice(0, 200).trim() };
   }
 
   // For raw text / URLs: use first line as title, first paragraph as description
