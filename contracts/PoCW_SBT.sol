@@ -66,11 +66,12 @@ contract PoCW_SBT is ERC1155URIStorage, Ownable {
         _setURI(id, tokenUri);
     }
 
-    // ── Soulbound: block all transfers ────────────────────────────────────────
+    // ── Soulbound: allow only mint (from 0) and burn (to 0); block all transfers ──
 
-    function safeTransferFrom(address, address, uint256, uint256, bytes memory)
-        public virtual override { revert("Soulbound: transfers disabled"); }
-
-    function safeBatchTransferFrom(address, address, uint256[] memory, uint256[] memory, bytes memory)
-        public virtual override { revert("Soulbound: transfers disabled"); }
+    function _update(address from, address to, uint256[] memory ids, uint256[] memory values)
+        internal virtual override
+    {
+        require(from == address(0) || to == address(0), "Soulbound: transfers disabled");
+        super._update(from, to, ids, values);
+    }
 }

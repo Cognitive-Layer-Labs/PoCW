@@ -24,11 +24,10 @@ PoCW is a protocol that issues **Soulbound Tokens (SBTs)** as tamper-proof proof
   │  1. Load important concepts from KG (importance ≥ 0.65)        │
   │  2. Select next concept to test (mastery loop + IRT Fisher)     │
   │  3. Generate question targeting that concept + Bloom level      │
-  │     ┌──────────────┐   ┌─────────────────────┐                 │
-  │     │  KAQG (LLM)  │ + │  IRT Predictor      │                 │
-  │     │  b, bloom,   │   │  (XGBoost sidecar)  │                 │
-  │     │  key points  │   │  a, refine b, d     │                 │
-  │     └──────────────┘   └─────────────────────┘                 │
+  │     ┌──────────────┐                                            │
+  │     │  KAQG (LLM)  │  b (difficulty), bloom, key points         │
+  │     └──────────────┘                                            │
+  │     IRT params: a ← concept importance, b ← LLM, c ← type, d=0.95│
   │  4. User answers → claim-based grading (LLM)                    │
   │  5. MAP update of θ (user ability) using 4PL IRT                │
   │  6. Repeat until concepts mastered or max questions reached     │
@@ -39,12 +38,22 @@ PoCW is a protocol that issues **Soulbound Tokens (SBTs)** as tamper-proof proof
                 ▼
   ┌─────────────────────┐     ┌────────────────────────────────────┐
   │  Oracle signs       │────▶│  PoCW_Controller (EVM contract)    │
-  │  attestation        │     │  verifyAndMint() → PoCW_SBT        │
-  │  (EIP-191)          │     │  (ERC-1155 Soulbound Token)        │
+  │  EIP-712 attestation│     │  verifyAndMint() → SBT + KAL       │
+  │  (incl. kalAmount)  │     │  (atomic, in one user tx)          │
   └─────────────────────┘     └────────────────────────────────────┘
 ```
 
-The SBT is non-transferable and encodes a cognitive profile: θ score, content ID, oracle signature. It lives on-chain permanently.
+The SBT is non-transferable and encodes that holder's cognitive profile (θ, score, content). Its
+token id is **per-holder** — `keccak256(user, contentId)` — so each learner's credential is
+independent and cannot be overwritten by another minter. It lives on-chain permanently.
+
+**Credentials & rewards (on-chain).** `verifyAndMint` verifies the oracle's **EIP-712** attestation
+(domain-bound to the chain + controller, so signatures can't be replayed across chains/deploys),
+then mints both the SBT **and** the KAL reward in a single user transaction. The controller is the
+KAL owner, so **KAL can only be created via a signed, expiring, nonce-protected attestation** — and
+it goes **100% to the learner** (no treasury cut / split). If the learner has no gas at first, they
+can claim later: the oracle persists the result and a `POST /api/verify/reattest` endpoint re-issues
+a fresh attestation on demand.
 
 ---
 
@@ -53,10 +62,9 @@ The SBT is non-transferable and encodes a cognitive profile: θ score, content I
 | Service | Role |
 |---|---|
 | `oracle` | Node.js/Express — indexing, session management, LLM calls, attestation signing |
-| `predictor` | Python/FastAPI — XGBoost IRT parameter sidecar (discrimination `a`, difficulty `b`, upper asymptote `d`) |
 | `falkordb` | Redis-based graph DB — stores the Knowledge Graph built during indexing |
 | `redis` | Session state and queue for the oracle service |
-| Smart contracts | `PoCW_SBT` (ERC-1155) + `PoCW_Controller` (verification + mint) |
+| Smart contracts | `PoCW_SBT` (soulbound ERC-1155) · `KAL` (ERC-20 reward) · `PoCW_Controller` (EIP-712 verify → mints SBT + KAL) · `KalPaywall` (paid-course access) |
 
 ---
 
@@ -75,7 +83,7 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-This starts FalkorDB, Redis, the IRT predictor, and the Oracle service. The predictor image takes a few minutes to build the first time (downloads the sentence-transformer model).
+This starts FalkorDB, Redis, and the Oracle service.
 
 ### 3. Index content
 
@@ -134,12 +142,6 @@ cp .env.example .env
 | `POCW_API_KEY` | Recommended | Bearer token gate for `/api` routes |
 | `PORT` | Optional | Oracle listen port (default `3000`) |
 
-### IRT predictor
-
-| Variable | Optional | Purpose |
-|---|---|---|
-| `PREDICTOR_URL` | Optional | Predictor sidecar URL (default `http://predictor:3001` in compose, `http://127.0.0.1:3001` standalone) |
-
 ### Data stores
 
 | Variable | Optional | Purpose |
@@ -182,7 +184,7 @@ cat deployments/base-sepolia.json
 
 ## Production (VPS)
 
-The VPS compose file runs the full stack: FalkorDB, Redis, predictor, oracle, nginx (reverse proxy), and certbot (auto-renewing TLS). Set `ORACLE_DOMAIN` and `ACME_EMAIL` in `.env`, then:
+The VPS compose file runs the full stack: FalkorDB, Redis, oracle, nginx (reverse proxy), and certbot (auto-renewing TLS). Set `ORACLE_DOMAIN` and `ACME_EMAIL` in `.env`, then:
 
 ```bash
 docker compose -f docker-compose.vps.yml up -d --build

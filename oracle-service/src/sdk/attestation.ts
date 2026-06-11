@@ -25,11 +25,12 @@ export async function attestOffchain(
   subject: string,
   contentId: number,
   score: number,
+  kalAmountWei: string,
   tokenUri: string,
   contentHash: string
 ): Promise<OffchainAttestation> {
   try {
-    const { signature, nonce, expiry } = await signMintAuthorization(subject, contentId, score, tokenUri);
+    const { signature, nonce, expiry } = await signMintAuthorization(subject, contentId, score, kalAmountWei, tokenUri);
     return {
       type: "offchain",
       signature,
@@ -37,6 +38,7 @@ export async function attestOffchain(
       expiry,
       contentId,
       score: Math.round(score),
+      kalAmount: kalAmountWei,
       oracle: getOracleAddress(),
       tokenUri,
       contentHash,
@@ -58,12 +60,13 @@ export async function attestOnchain(
   subject: string,
   contentId: number,
   score: number,
+  kalAmountWei: string,
   tokenUri: string,
   contentHash: string,
   chain: ChainConfig
 ): Promise<OnchainAttestation> {
   try {
-    const { signature, nonce, expiry } = await signMintAuthorization(subject, contentId, score, tokenUri);
+    const { signature, nonce, expiry } = await signMintAuthorization(subject, contentId, score, kalAmountWei, tokenUri);
     return {
       type: "onchain",
       signature,
@@ -71,6 +74,7 @@ export async function attestOnchain(
       expiry,
       contentId,
       score: Math.round(score),
+      kalAmount: kalAmountWei,
       oracle: getOracleAddress(),
       controllerAddress: chain.controllerAddress,
       sbtAddress: chain.sbtAddress,
@@ -95,6 +99,7 @@ export async function buildAttestation(
   subject: string,
   contentId: number,
   score: number,
+  kalAmountWei: string,
   tokenUri: string,
   contentHash: string,
   chain?: ChainConfig
@@ -103,11 +108,11 @@ export async function buildAttestation(
     case "none":
       return undefined;
     case "offchain":
-      return attestOffchain(subject, contentId, score, tokenUri, contentHash);
+      return attestOffchain(subject, contentId, score, kalAmountWei, tokenUri, contentHash);
     case "onchain":
       if (!chain) {
         throw new PoCWError("INVALID_CONFIG", "chain config required for on-chain attestation");
       }
-      return attestOnchain(subject, contentId, score, tokenUri, contentHash, chain);
+      return attestOnchain(subject, contentId, score, kalAmountWei, tokenUri, contentHash, chain);
   }
 }

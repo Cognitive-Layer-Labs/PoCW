@@ -57,7 +57,17 @@ export interface UploadResult {
 
 const DATA_DIR = path.resolve(__dirname, "..", "..", "data", "profiles");
 
-const TOKEN_IMAGE_URL = "https://cognitive-layer-labs.github.io/PoCW/cat.jpeg";
+// On-chain SVG logo (data URI) — self-contained, renders in explorers/wallets without an
+// external host. Matches the PoCW collection brand (see PoCW_SBT.contractURI()).
+const LOGO_SVG =
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">' +
+  '<rect width="200" height="200" rx="16" fill="#0c0c12"/>' +
+  '<text x="100" y="68" text-anchor="middle" font-family="monospace" font-size="22" fill="#7c3aed" font-weight="bold" letter-spacing="2">PoCW</text>' +
+  '<circle cx="100" cy="118" r="40" fill="none" stroke="#7c3aed" stroke-width="3"/>' +
+  '<text x="100" y="114" text-anchor="middle" font-family="monospace" font-size="11" fill="#94a3b8">Proof of</text>' +
+  '<text x="100" y="130" text-anchor="middle" font-family="monospace" font-size="11" fill="#94a3b8">Cognitive Work</text>' +
+  '</svg>';
+const TOKEN_IMAGE_URL = `data:image/svg+xml;base64,${Buffer.from(LOGO_SVG).toString("base64")}`;
 
 // ─── ERC-1155 metadata ───────────────────────────────────────────────────────
 

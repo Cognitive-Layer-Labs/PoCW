@@ -54,9 +54,8 @@ function printFeedback(fb: AnswerFeedback): void {
 
   if (fb.irtParams) {
     const p = fb.irtParams;
-    const bPred = p.b_pred !== null ? p.b_pred.toFixed(3) : "n/a";
     console.log(`  IRT update:`);
-    console.log(`    a=${p.a.toFixed(3)}  b_llm=${p.b_llm.toFixed(3)}  b_pred=${bPred}  b_used=${p.b_used.toFixed(3)}  c=${p.c}  d=${p.d.toFixed(3)}`);
+    console.log(`    a=${p.a.toFixed(3)} (importance ${p.importance.toFixed(2)})  b=${p.b.toFixed(3)} (LLM)  c=${p.c}  d=${p.d.toFixed(3)}`);
     console.log(`    θ  ${p.theta_before.toFixed(3)} → ${fb.progress.theta.toFixed(3)}   SE=${fb.progress.se.toFixed(3)}`);
   }
 
@@ -121,6 +120,10 @@ async function main() {
     console.log("Oracle:", oracle.address);
     console.log("User:  ", user.address);
 
+    const KAL = await hre.ethers.getContractFactory("KAL");
+    const kal = await KAL.deploy();
+    await kal.waitForDeployment();
+
     const SBT = await hre.ethers.getContractFactory("PoCW_SBT");
     const sbt = await SBT.deploy();
     await sbt.waitForDeployment();
@@ -129,13 +132,20 @@ async function main() {
     const controller = await Controller.deploy(
       oracle.address,
       await sbt.getAddress(),
+      await kal.getAddress(),
       false  // strictSender=false for local testing
     );
     await controller.waitForDeployment();
     await sbt.transferOwnership(await controller.getAddress());
+    await kal.transferOwnership(await controller.getAddress());
 
     controllerAddress = await controller.getAddress();
     sbtAddress        = await sbt.getAddress();
+
+    // The oracle's EIP-712 domain must point at this freshly deployed controller.
+    process.env.CONTROLLER_ADDRESS = controllerAddress;
+    process.env.SBT_ADDRESS = sbtAddress;
+    process.env.CHAIN_ID = String((await hre.ethers.provider.getNetwork()).chainId);
     console.log("\nContracts deployed");
   } else {
     /* ── Testnet: read addresses from deployments/<network>.json ── */
@@ -228,55 +238,29 @@ async function main() {
     const controller = await hre.ethers.getContractAt("PoCW_Controller", controllerAddress);
     const sbt        = await hre.ethers.getContractAt("PoCW_SBT", sbtAddress);
 
+    // Atomic: verifyAndMint mints the per-holder SBT AND the KAL reward in a single tx.
+    const { ethers } = hre;
     await controller.verifyAndMint(
       userAddress,
       att.contentId,
-      result.score,
+      att.score,
+      att.kalAmount,
       att.expiry,
       att.nonce,
       result.tokenUri ?? "",
       att.signature
     );
 
-    const balance = await sbt.balanceOf(userAddress, att.contentId);
-    console.log("SBT balance:", balance.toString());
+    const tokenId = await controller.sbtTokenId(userAddress, att.contentId);
+    const balance = await sbt.balanceOf(userAddress, tokenId);
+    console.log("SBT balance:", balance.toString(), `(tokenId ${tokenId})`);
 
-    // Mint KAL
-    if (result.kalAmount && result.kalAmount > 0) {
-      console.log(`\n=== MINTING KAL: ${result.kalAmount} KAL ===`);
-      const { ethers } = hre;
-      const KAL_ABI = ["function mint(address to, uint256 amount) external"];
-
-      // Read kalAddress from deployments record (set during deploy)
-      let kalAddress: string | undefined;
-      if (networkName !== "localhost" && networkName !== "hardhat") {
-        const recordPath = path.resolve(__dirname, "..", "deployments", `${networkName}.json`);
-        if (fs.existsSync(recordPath)) {
-          kalAddress = JSON.parse(fs.readFileSync(recordPath, "utf8")).kalAddress;
-        }
-      } else {
-        // Local: deploy fresh KAL owned by the oracle signer
-        const oracle = signers[1];
-        const KAL = await ethers.getContractFactory("KAL", oracle);
-        const kalContract = await KAL.deploy();
-        await kalContract.waitForDeployment();
-        kalAddress = await kalContract.getAddress();
-        console.log("KAL deployed at:", kalAddress);
-      }
-
-      if (kalAddress) {
-        const oracle    = networkName === "localhost" || networkName === "hardhat" ? signers[1] : signers[0];
-        const kal       = new ethers.Contract(kalAddress, KAL_ABI, oracle);
-        const amountWei = ethers.parseEther(result.kalAmount.toFixed(18));
-        await (kal.mint as any)(userAddress, amountWei);
-        const kalContract = await ethers.getContractAt(
-          ["function balanceOf(address) view returns (uint256)"],
-          kalAddress
-        );
-        const kalBalance = await (kalContract.balanceOf as any)(userAddress);
-        console.log("KAL balance:", ethers.formatEther(kalBalance), "KAL");
-      }
-    }
+    const kal = await ethers.getContractAt(
+      ["function balanceOf(address) view returns (uint256)"],
+      await controller.kalToken()
+    );
+    const kalBalance = await (kal.balanceOf as any)(userAddress);
+    console.log("KAL balance:", ethers.formatEther(kalBalance), "KAL (minted atomically with the SBT)");
   }
 
   await pocw.close();

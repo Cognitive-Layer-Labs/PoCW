@@ -22,10 +22,6 @@ deployments/localhost.json
 data/
 oracle-service/data/
 
-# Predictor model binaries (baked into Docker image, not committed)
-predictor/model/*.pkl
-predictor/model/*.npy
-
 # Logs
 .logs/
 

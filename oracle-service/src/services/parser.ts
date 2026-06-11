@@ -88,6 +88,40 @@ export async function parseContentToText(url: string): Promise<string> {
   throw new Error(`Unsupported content type: ${contentType}`);
 }
 
+/**
+ * Like parseContentToText, but also returns the HTML <title> tag for web pages.
+ * Only call this when you need the title; use parseContentToText otherwise.
+ */
+export async function parseWebContentWithTitle(url: string): Promise<{ text: string; htmlTitle: string | null }> {
+  if (url.startsWith("file://") || isYouTube(url) || isIPFS(url)) {
+    const text = await parseContentToText(url);
+    return { text, htmlTitle: null };
+  }
+
+  // Same protocol/scheme allowlist as parseContentToText (defense-in-depth, parity).
+  const validationError = validateSourceUrl(url);
+  if (validationError) throw new Error(validationError);
+
+  blockPrivateIp(url);
+
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Failed to fetch: ${url} (HTTP ${res.status})`);
+
+  const contentType = (res.headers.get("content-type") || "").toLowerCase();
+
+  if (isHTML(contentType, url)) {
+    const html = await res.text();
+    return {
+      text: truncate(cleanText(extractMainContent(html))),
+      htmlTitle: extractHtmlTitle(html),
+    };
+  }
+
+  // For non-HTML, fall back to the regular parser (no HTML title)
+  const text = await parseContentToText(url);
+  return { text, htmlTitle: null };
+}
+
 /* ================= validation ================= */
 
 /**
@@ -199,6 +233,94 @@ function normalizeIPFS(url: string): string {
 }
 
 /**
+ * Extract the HTML <title> tag value from a raw HTML string.
+ * Returns null when absent or blank.
+ */
+export function extractHtmlTitle(html: string): string | null {
+  const m = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+  return m ? m[1].trim() || null : null;
+}
+
+/**
+ * Strict YouTube URL check — only returns true when the hostname is
+ * youtube.com or youtu.be. Prevents false positives on Wikipedia, GitHub,
+ * or any URL that happens to have an 11-character path segment.
+ */
+export function isYouTubeStrict(url: string): boolean {
+  try {
+    const { hostname } = new URL(url);
+    const host = hostname.replace(/^www\./, "");
+    return host === "youtube.com" || host === "youtu.be";
+  } catch {
+    return false;
+  }
+}
+
+/** Extract YouTube video ID from a confirmed YouTube URL. */
+export function extractYouTubeId(url: string): string | null {
+  const m =
+    url.match(/[?&]v=([\w-]{11})/) ||
+    url.match(/youtu\.be\/([\w-]{11})/) ||
+    url.match(/youtube\.com\/embed\/([\w-]{11})/) ||
+    url.match(/youtube\.com\/shorts\/([\w-]{11})/);
+  return m ? m[1] : null;
+}
+
+/**
+ * Re-derive a human-readable title for any indexed URL.
+ * Uses LLM for web pages, oEmbed for YouTube.
+ * Suitable for patching already-indexed entries that have stale/wrong titles.
+ */
+export async function rederiveTitle(source: string, existingText?: string): Promise<string | null> {
+  try {
+    if (isYouTubeStrict(source)) {
+      const videoId = extractYouTubeId(source);
+      if (videoId) {
+        const res = await fetch(
+          `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`,
+          { signal: AbortSignal.timeout(5000) }
+        );
+        if (res.ok) {
+          const data = await res.json() as { title?: string };
+          if (data.title) return data.title;
+        }
+      }
+      return null; // YouTube but oEmbed failed
+    }
+
+    // Web page: re-fetch with HTML title extraction
+    const parsed = await parseWebContentWithTitle(source);
+    const text = existingText ?? parsed.text;
+
+    // Call LLM (dynamic import to avoid circular deps from sdk/index.ts)
+    const { getOpenAIClient } = await import("./llm-client");
+    const snippet = text.slice(0, 4000);
+    const prompt = [
+      "Given the following information about a web page, provide a concise accurate title (under 120 characters). Reply with ONLY the title — no quotes, no explanation.",
+      `URL: ${source}`,
+      parsed.htmlTitle ? `HTML <title>: ${parsed.htmlTitle}` : null,
+      `Content excerpt:\n${snippet}`,
+    ].filter(Boolean).join("\n");
+
+    const completion = await getOpenAIClient().chat.completions.create({
+      model: "google/gemini-2.5-flash",
+      max_tokens: 80,
+      temperature: 0,
+      messages: [{ role: "user", content: prompt }],
+    });
+    const result = (completion.choices[0]?.message?.content ?? "").trim();
+    if (result.length > 5 && result.length < 200) return result;
+
+    // LLM gave nothing useful — fall through to htmlTitle or first line
+    if (parsed.htmlTitle && parsed.htmlTitle.length > 5) return parsed.htmlTitle.slice(0, 200);
+    const lines = text.split(/\n+/).map(l => l.trim()).filter(Boolean);
+    return lines[0]?.slice(0, 200) || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Extract main article content from HTML, removing all navigation/UI boilerplate.
  * Strategy:
  *   1. Remove known noise elements (nav, footer, sidebars, scripts, ads, Wikipedia UI).
@@ -307,6 +429,7 @@ export function chunkText(text: string, chunkSize = 4000, overlap = 500): string
  */
 async function parseYouTube(url: string): Promise<string> {
   const videoId = extractYouTubeId(url);
+  if (!videoId) throw new Error(`Could not extract YouTube video ID from: ${url}`);
 
   // Most reliable server-side path: InnerTube captionTracks.
   const innerTubeText = await fetchTranscriptViaInnerTube(videoId);
@@ -636,10 +759,4 @@ async function fetchTranscriptViaYouTubeTimedText(videoId: string): Promise<stri
   }
 }
 
-function extractYouTubeId(url: string): string {
-  const match = url.match(/(?:v=|\/)([0-9A-Za-z_-]{11})/);
-  if (!match) {
-    throw new Error("Invalid YouTube URL");
-  }
-  return match[1];
-}
+// extractYouTubeId is now exported above (strict version that returns string | null)

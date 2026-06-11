@@ -55,46 +55,53 @@ async function main() {
     throw new Error(`${label}: failed after nonce retries`);
   }
 
+  // strictSender=true on public networks; false on local nodes for easier testing
+  const strictSender = networkName !== "hardhat" && networkName !== "localhost";
+
+  // 1. KAL ERC-20 (deployed first — the controller's constructor needs its address)
+  const KAL = await hre.ethers.getContractFactory("KAL");
+  const kal = await withNonceRetry("KAL.deploy", async (nonce) => KAL.deploy({ nonce }));
+  await kal.waitForDeployment();
+  const kalAddress = await kal.getAddress();
+  console.log(`KAL deployed at ${kalAddress}`);
+
+  // 2. PoCW_SBT (soulbound ERC-1155)
   const PoCW_SBT = await hre.ethers.getContractFactory("PoCW_SBT");
-  const sbt = await withNonceRetry("PoCW_SBT.deploy", async (nonce) =>
-    PoCW_SBT.deploy({ nonce })
-  );
+  const sbt = await withNonceRetry("PoCW_SBT.deploy", async (nonce) => PoCW_SBT.deploy({ nonce }));
   await sbt.waitForDeployment();
   const sbtAddress = await sbt.getAddress();
   console.log(`PoCW_SBT deployed at ${sbtAddress}`);
 
-  // strictSender=true on public networks; false on local nodes for easier testing
-  const strictSender = networkName !== "hardhat" && networkName !== "localhost";
-
+  // 3. PoCW_Controller (EIP-712; mints SBT + KAL atomically in verifyAndMint)
   const PoCW_Controller = await hre.ethers.getContractFactory("PoCW_Controller");
   const controller = await withNonceRetry("PoCW_Controller.deploy", async (nonce) =>
-    PoCW_Controller.deploy(oracleAddress, sbtAddress, strictSender, { nonce })
+    PoCW_Controller.deploy(oracleAddress, sbtAddress, kalAddress, strictSender, { nonce })
   );
   await controller.waitForDeployment();
   const controllerAddress = await controller.getAddress();
   console.log(`PoCW_Controller deployed at ${controllerAddress} (strictSender=${strictSender})`);
 
-  const tx = await withNonceRetry("PoCW_SBT.transferOwnership", async (nonce) =>
+  // 4. Hand both token contracts to the controller so it is the sole minter
+  //    (KAL can then only be minted via a signed, expiring, nonce-protected attestation).
+  await (await withNonceRetry("PoCW_SBT.transferOwnership", async (nonce) =>
     sbt.transferOwnership(controllerAddress, { nonce })
-  );
-  await tx.wait();
+  )).wait();
   console.log("Transferred SBT ownership to controller");
 
-  // Deploy KAL ERC-20 — oracle wallet is owner (minter)
-  const KAL = await hre.ethers.getContractFactory("KAL");
-  const kal = await withNonceRetry("KAL.deploy", async (nonce) =>
-    KAL.deploy({ nonce })
-  );
-  await kal.waitForDeployment();
-  const kalAddress = await kal.getAddress();
-  console.log(`KAL deployed at ${kalAddress}`);
+  await (await withNonceRetry("KAL.transferOwnership", async (nonce) =>
+    kal.transferOwnership(controllerAddress, { nonce })
+  )).wait();
+  console.log("Transferred KAL ownership to controller");
 
-  // Transfer KAL ownership to oracle wallet so it can call mint()
-  const kalOwnerTx = await withNonceRetry("KAL.transferOwnership", async (nonce) =>
-    kal.transferOwnership(oracleAddress, { nonce })
+  // 5. KalPaywall — oracle signs EIP-712 price quotes; KAL flows to the treasury
+  const treasury = deployer.address; // deployer is the treasury for now; change if needed
+  const KalPaywall = await hre.ethers.getContractFactory("KalPaywall");
+  const paywall = await withNonceRetry("KalPaywall.deploy", async (nonce) =>
+    KalPaywall.deploy(kalAddress, oracleAddress, treasury, { nonce })
   );
-  await kalOwnerTx.wait();
-  console.log(`KAL ownership transferred to oracle (${oracleAddress})`);
+  await paywall.waitForDeployment();
+  const paywallAddress = await paywall.getAddress();
+  console.log(`KalPaywall deployed at ${paywallAddress} (treasury=${treasury})`);
 
   // Write deployment record for frontend + oracle config
   const deploymentsDir = path.resolve(__dirname, "..", "deployments");
@@ -106,7 +113,9 @@ async function main() {
     controllerAddress,
     sbtAddress,
     kalAddress,
+    paywallAddress,
     oracleAddress,
+    treasury,
     strictSender,
     deployedAt: new Date().toISOString(),
     deployer: deployer.address,

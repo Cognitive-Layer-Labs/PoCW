@@ -40,6 +40,13 @@ ALTER TABLE content_index ADD COLUMN title TEXT;
 ALTER TABLE content_index ADD COLUMN description TEXT;
 `;
 
+// Migration: add access-control columns if they don't exist
+const ADD_ACCESS_COLUMNS = [
+  "ALTER TABLE content_index ADD COLUMN tier TEXT DEFAULT 'free'",
+  "ALTER TABLE content_index ADD COLUMN kal_price INTEGER",
+  "ALTER TABLE content_index ADD COLUMN unlock_rule TEXT",
+];
+
 // ─── Write Queue — serializes all mutating calls to prevent SQLITE_BUSY ──
 
 let writeChain: Promise<unknown> = Promise.resolve();
@@ -73,6 +80,15 @@ export function initContentStore(
     db.exec(ADD_TITLE_DESC);
   } catch {
     // Columns already exist — ignore
+  }
+
+  // Add access-control columns if they don't exist (idempotent)
+  for (const stmt of ADD_ACCESS_COLUMNS) {
+    try {
+      db.exec(stmt);
+    } catch {
+      // Column already exists — ignore
+    }
   }
 }
 
@@ -153,6 +169,40 @@ export async function updateMetadata(
     getDb()
       .prepare("UPDATE content_index SET title = ?, description = ? WHERE knowledge_id = ?")
       .run(title, description, knowledgeId);
+  });
+}
+
+export interface UnlockRule {
+  /** "any" = hold any ONE of the listed SBT content-ids. */
+  mode: "any";
+  /** Integer content_ids whose corresponding SBT unlocks this course. */
+  sbtContentIds: number[];
+}
+
+/**
+ * Update the access-control tier for a content entry.
+ */
+export async function updateAccess(
+  knowledgeId: string,
+  access: {
+    tier: "free" | "paid" | "unlocked";
+    kalPrice?: number | null;
+    unlockRule?: UnlockRule | null;
+  }
+): Promise<void> {
+  return runSerialized(() => {
+    getDb()
+      .prepare(`
+        UPDATE content_index
+        SET tier = ?, kal_price = ?, unlock_rule = ?
+        WHERE knowledge_id = ?
+      `)
+      .run(
+        access.tier,
+        access.kalPrice ?? null,
+        access.unlockRule ? JSON.stringify(access.unlockRule) : null,
+        knowledgeId
+      );
   });
 }
 

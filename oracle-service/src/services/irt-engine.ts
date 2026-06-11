@@ -22,8 +22,8 @@ export const BLOOM_WEIGHTS: Record<string, number> = {
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface IRTResponse {
-  difficulty: number;   // combined b (0.85*b_llm + 0.15*b_pred)
-  a: number;            // discrimination
+  difficulty: number;   // b — LLM-rated question difficulty
+  a: number;            // discrimination (from contextual importance)
   c: number;            // lower asymptote (guessing; type-based)
   d: number;            // upper asymptote
   correct: boolean;

@@ -145,6 +145,12 @@ export interface ContentRow {
   indexed_at: string | null;
   usage_count: number;
   last_used_at: string | null;
+  /** Access tier: 'free' | 'paid' | 'unlocked'. Default 'free'. */
+  tier: "free" | "paid" | "unlocked" | null;
+  /** KAL tokens required to access (paid tier only). */
+  kal_price: number | null;
+  /** JSON-encoded UnlockRule (unlocked tier only). */
+  unlock_rule: string | null;
 }
 
 // ─── Verification Question ───────────────────────────────────────────────────
@@ -171,14 +177,14 @@ export interface AnswerFeedback {
     total_points: number;
     precision_cap: number;
   };
-  /** IRT parameters used for this item and the resulting ability shift. */
+  /** IRT parameters used for this item and the resulting ability shift.
+   *  a ← contextual importance, b ← LLM difficulty rating, c ← question type, d ← constant. */
   irtParams?: {
     a: number;
-    b_llm: number;
-    b_pred: number | null;
-    b_used: number;
+    b: number;
     c: number;
     d: number;
+    importance: number;
     theta_before: number;
   };
   /** Reference key points for open questions (from question generation). */
@@ -212,6 +218,8 @@ export interface OnchainAttestation {
   signature: string;
   contentId: number;
   score: number;
+  /** KAL reward in wei (18-dec, decimal string) — part of the signed payload, minted by the controller */
+  kalAmount: string;
   oracle: string;
   controllerAddress: string;
   sbtAddress: string;
@@ -230,6 +238,8 @@ export interface OffchainAttestation {
   signature: string;
   contentId: number;
   score: number;
+  /** KAL reward in wei (18-dec, decimal string) — part of the signed payload */
+  kalAmount: string;
   oracle: string;
   /** Replay protection: unique bytes32 nonce (0x-prefixed hex) included in the signed payload */
   nonce: string;

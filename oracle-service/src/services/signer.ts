@@ -2,10 +2,23 @@ import { ethers } from "ethers";
 import { randomBytes } from "crypto";
 import * as dotenv from "dotenv";
 import * as path from "path";
+import { controllerAddress, chainId } from "./chain-config";
 
 dotenv.config({ path: path.resolve(__dirname, "..", "..", "..", ".env") });
 
 const { ORACLE_PRIVATE_KEY } = process.env;
+
+const ATTESTATION_TYPES = {
+  Attestation: [
+    { name: "user", type: "address" },
+    { name: "contentId", type: "uint256" },
+    { name: "score", type: "uint256" },
+    { name: "kalAmount", type: "uint256" },
+    { name: "expiry", type: "uint256" },
+    { name: "nonce", type: "bytes32" },
+    { name: "tokenUriHash", type: "bytes32" },
+  ],
+};
 
 if (!ORACLE_PRIVATE_KEY) {
   throw new Error("ORACLE_PRIVATE_KEY not set");
@@ -26,39 +39,43 @@ export interface SignedResult {
 }
 
 /**
- * Sign a mint authorization.
+ * Sign a mint authorization as EIP-712 typed data matching PoCW_Controller:
+ *   domain = ("PoCW","1", chainId, controllerAddress)
+ *   Attestation(user, contentId, score, kalAmount, expiry, nonce, tokenUriHash)
  *
- * Signed payload matches PoCW_Controller.verifyAndMint on-chain:
- *   keccak256(abi.encode(user, contentId, score, nonce, expiry, keccak256(bytes(tokenUri))))
- *
- * Then signed with wallet.signMessage (eth_sign prefix).
- *
- * @param tokenUri  Base64 data URI (data:application/json;base64,...) of the ERC-1155 metadata.
- *                  Must be encoded before calling this function.
+ * @param kalAmountWei  KAL reward in wei (18-dec), as a decimal string. "0" if none.
+ * @param tokenUri      Base64 data URI of the ERC-1155 metadata (encoded before calling).
  */
 export async function signMintAuthorization(
   userAddress: string,
   contentId: number,
   score: number,
+  kalAmountWei: string,
   tokenUri: string,
   nonce?: string,
   expiry?: number
 ): Promise<SignedResult> {
-  // Generate a 32-byte random nonce as 0x-prefixed hex
   const _nonce = nonce ?? ethers.hexlify(randomBytes(32));
   const _expiry = expiry ?? Math.floor(Date.now() / 1000) + 86_400; // 24 h TTL
-  const _score = Math.round(score); // ensure integer before ABI encode
+  const _score = Math.round(score);
 
-  const abiCoder = ethers.AbiCoder.defaultAbiCoder();
-  // Hash the tokenUri as bytes32 to handle dynamic-length string in abi.encode
-  const tokenUriHash = ethers.keccak256(ethers.toUtf8Bytes(tokenUri));
+  const verifyingContract = controllerAddress();
+  const cid = chainId();
+  if (!verifyingContract || !cid) {
+    throw new Error("EIP-712 signing requires CONTROLLER_ADDRESS + CHAIN_ID (env or deployments/*.json)");
+  }
 
-  const encoded = abiCoder.encode(
-    ["address", "uint256", "uint256", "bytes32", "uint256", "bytes32"],
-    [userAddress, BigInt(contentId), BigInt(_score), _nonce, BigInt(_expiry), tokenUriHash]
-  );
-  const messageHash = ethers.keccak256(encoded);
-  const signature = await wallet.signMessage(ethers.getBytes(messageHash));
+  const domain = { name: "PoCW", version: "1", chainId: cid, verifyingContract };
+  const value = {
+    user: userAddress,
+    contentId: BigInt(contentId),
+    score: BigInt(_score),
+    kalAmount: BigInt(kalAmountWei),
+    expiry: BigInt(_expiry),
+    nonce: _nonce,
+    tokenUriHash: ethers.keccak256(ethers.toUtf8Bytes(tokenUri)),
+  };
+  const signature = await wallet.signTypedData(domain, ATTESTATION_TYPES, value);
 
   return { signature, nonce: _nonce, expiry: _expiry };
 }

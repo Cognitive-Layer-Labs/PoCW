@@ -66,10 +66,10 @@ P(correct | θ) = c + (d − c) / (1 + exp(−a · (θ − b)))
 | Parameter | Meaning | Range | Source |
 |---|---|---|---|
 | `θ` (theta) | User ability | [−2, 2] | Estimated via MAP Newton-Raphson |
-| `b` | Item difficulty | [−2, 2] | Combined: 85% KAQG LLM + 15% IRT predictor |
-| `a` | Discrimination | [0.5, 2.5] | IRT predictor (XGBoost), default 1.0 |
+| `b` | Item difficulty | [−2, 2] | KAQG LLM's per-question difficulty rating |
+| `a` | Discrimination | [0.5, 2.5] | Target concept's contextual importance (KG) |
 | `c` | Lower asymptote (guessing) | 0–0.5 | Type-based rule (see below) |
-| `d` | Upper asymptote | [0.75, 1.0] | IRT predictor (XGBoost), default 0.95 |
+| `d` | Upper asymptote | constant | Fixed `0.95` |
 
 **Type-based `c` (guessing probability):**
 
@@ -79,18 +79,17 @@ P(correct | θ) = c + (d − c) / (1 + exp(−a · (θ − b)))
 | `mcq` | 0.25 | 25% random guess chance (4 options) |
 | `open` | 0.00 | No guessing possible on free text |
 
-**Combined `b` formula:**
+**Parameter sources:**
 
-```
-b_combined = 0.85 × b_llm + 0.15 × b_predictor
-```
+- `b` is the KAQG LLM's own difficulty rating for the generated question (in [−2, 2]).
+- `a = clamp(0.5, 2.5, 0.5 + 2.0 × importance)`, where `importance` ∈ [0, 1] is the target
+  concept's contextual importance in the Knowledge Graph (more central concept ⇒ more discriminating).
+- `c` is the type-based guessing floor (table above).
+- `d = 0.95` (constant upper asymptote; models ~5% slip even at high ability).
 
-`b_llm` comes from the KAQG LLM (asked to estimate IRT difficulty in [−2, 2]).
-`b_predictor` is XGBoost output from text features + embeddings.
-The LLM weight is high (0.85) because the predictor's b prediction is weak (R²=0.086 on MMLU benchmark).
-The predictor's `a` and `d` are used directly since they carry more signal relative to their scale.
-
-If the predictor sidecar is unreachable: `a=1.0`, `d=0.95` (defaults), `b=b_llm`.
+> **Note.** Earlier versions blended in a Python/XGBoost "IRT predictor" sidecar for `a`/`b`/`d`.
+> That was removed: text-only semantic difficulty prediction proved too weak to add signal (see the
+> `irt-difficulty-2-0` experiments), so the parameters now come from signals the pipeline already has.
 
 ---
 
@@ -240,16 +239,3 @@ keccak256(abi.encode(
 
 The SBT (`PoCW_SBT`) stores the `tokenUri` on-chain. It contains a base64-encoded JSON cognitive profile (θ, SE, score, question types, Bloom coverage, oracle address, timestamp). No external storage is used.
 
----
-
-## 11. IRT Predictor Sidecar
-
-The predictor is a FastAPI/XGBoost service that estimates IRT parameters from question text alone, without seeing user responses. It is trained on 11,270 questions from MMLU + BoolQ + TriviaQA benchmarked against 12 open-source language models.
-
-**Input:** question text + answer choices (optional) + theta (optional)
-
-**Output:** `{ a, b, c, d, p_correct, difficulty, discrimination }`
-
-**Graceful fallback:** If the sidecar is unreachable, the oracle continues with `a=1.0, d=0.95` and uses `b_llm` directly. The `b_pred=n/a` is logged.
-
-See `predictor/` for the service code and `PoCW-IRT-Calibrator/` for training code and model releases.

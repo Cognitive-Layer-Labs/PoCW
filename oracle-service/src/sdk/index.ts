@@ -7,7 +7,7 @@
  */
 
 import { createHash } from "crypto";
-import { parseContentToText, chunkText } from "../services/parser";
+import { parseContentToText, parseWebContentWithTitle, chunkText, isYouTubeStrict, extractYouTubeId } from "../services/parser";
 import { extractKnowledgeGraph } from "../services/kg-builder";
 import { storeGraph, graphExists, initFalkorDB, closeFalkorDB } from "../services/kg-store";
 import { contentUrlToId } from "../services/session-manager";
@@ -305,9 +305,22 @@ class PoCW {
     contentId: number
   ): Promise<void> {
     try {
-      const text = detectContentType(source) === "raw_text"
-        ? source
-        : await parseContentToText(source);
+      const contentType = detectContentType(source);
+      let text: string;
+      let htmlTitle: string | null = null;
+
+      if (contentType === "raw_text") {
+        text = source;
+      } else if (contentType === "url") {
+        // Use the title-aware parser for web URLs so extractMetadata can call
+        // the LLM with the real HTML <title> tag (fixes "YouTube video <slug>" bug).
+        const parsed = await parseWebContentWithTitle(source);
+        text = parsed.text;
+        htmlTitle = parsed.htmlTitle;
+      } else {
+        text = await parseContentToText(source);
+      }
+
       const chunks = chunkText(text);
       const contentHash = createHash("sha256").update(text).digest("hex");
 
@@ -331,8 +344,8 @@ class PoCW {
       // Cache content for verify()
       contentCache.set(knowledgeId, { text, chunks });
 
-      // Extract title/description from text
-      const { title, description } = await extractMetadata(source, text);
+      // Extract title/description — pass htmlTitle so LLM can use it for web pages
+      const { title, description } = await extractMetadata(source, text, htmlTitle);
       await updateMetadata(knowledgeId, title, description);
 
       await markReady(knowledgeId, contentHash, chunks.length);
@@ -404,36 +417,86 @@ function detectContentType(source: string): string {
   }
 }
 
+// isYouTubeStrict + extractYouTubeId imported from parser.ts (single source of truth)
+
+/**
+ * Derive a clean title for a web page via LLM, given the HTML title, URL,
+ * and first ~4k characters of the extracted text. Falls back to htmlTitle or
+ * the first non-empty line of text.
+ */
+async function deriveWebTitle(
+  htmlTitle: string | null,
+  url: string,
+  text: string
+): Promise<string> {
+  try {
+    const { getOpenAIClient } = await import("../services/llm-client");
+    const snippet = text.slice(0, 4000);
+    const prompt = [
+      `Given the following information about a web page, provide a concise, accurate title (under 120 characters). Reply with ONLY the title — no quotes, no explanation.`,
+      `URL: ${url}`,
+      htmlTitle ? `HTML <title>: ${htmlTitle}` : null,
+      `Content excerpt:\n${snippet}`,
+    ].filter(Boolean).join("\n");
+
+    const completion = await getOpenAIClient().chat.completions.create({
+      model: "google/gemini-2.5-flash",
+      max_tokens: 80,
+      temperature: 0,
+      messages: [{ role: "user", content: prompt }],
+    });
+    const result = (completion.choices[0]?.message?.content ?? "").trim();
+    if (result.length > 5 && result.length < 200) return result;
+  } catch {
+    // LLM unavailable — use fallback chain
+  }
+  // Fallback: htmlTitle → first line of text → URL
+  if (htmlTitle && htmlTitle.length > 5) return htmlTitle.slice(0, 200);
+  const lines = text.split(/\n+/).map(l => l.trim()).filter(Boolean);
+  return lines[0]?.slice(0, 200) || url.slice(0, 100);
+}
+
 /**
  * Extract a human-readable title and description from content.
- * For YouTube URLs, the video ID is used as title hint.
- * For raw text, the first non-empty line becomes the title and
- * the first ~200 chars become the description.
+ *
+ * - YouTube URLs: fetch real title via oEmbed (strict host check prevents false matches).
+ * - Web pages: derive title with LLM from htmlTitle + URL + first 4k chars.
+ * - Raw text: first non-empty line becomes the title.
  */
-async function extractMetadata(source: string, text: string): Promise<{ title: string; description: string }> {
-  // YouTube: fetch real title via oEmbed (no API key required)
-  const ytMatch = source.match(/(?:v=|\/)([0-9A-Za-z_-]{11})/);
-  if (ytMatch) {
-    const videoId = ytMatch[1];
-    try {
-      const oembedUrl = `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`;
-      const res = await fetch(oembedUrl, { signal: AbortSignal.timeout(5000) });
-      if (res.ok) {
-        const data = await res.json() as { title?: string; author_name?: string };
-        if (data.title) {
-          return { title: data.title, description: text.slice(0, 200).trim() };
+async function extractMetadata(
+  source: string,
+  text: string,
+  htmlTitle?: string | null
+): Promise<{ title: string; description: string }> {
+  const description = text.slice(0, 300).trim();
+
+  // ── YouTube ──────────────────────────────────────────────────────────────────
+  if (isYouTubeStrict(source)) {
+    const videoId = extractYouTubeId(source);
+    if (videoId) {
+      try {
+        const oembedUrl = `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`;
+        const res = await fetch(oembedUrl, { signal: AbortSignal.timeout(5000) });
+        if (res.ok) {
+          const data = await res.json() as { title?: string };
+          if (data.title) return { title: data.title, description };
         }
+      } catch {
+        // oEmbed unavailable — fall through
       }
-    } catch {
-      // oEmbed unavailable — fall through to video ID fallback
+      // oEmbed failed: use LLM with available context
+      return { title: await deriveWebTitle(null, source, text), description };
     }
-    return { title: `YouTube video ${videoId}`, description: text.slice(0, 200).trim() };
   }
 
-  // For raw text / URLs: use first line as title, first paragraph as description
+  // ── Web page (has htmlTitle from parser) ─────────────────────────────────────
+  if (htmlTitle !== undefined) {
+    return { title: await deriveWebTitle(htmlTitle, source, text), description };
+  }
+
+  // ── Raw text / PDF / uploaded file ───────────────────────────────────────────
   const lines = text.split(/\n+/).map(l => l.trim()).filter(Boolean);
   const title = lines[0]?.slice(0, 200) || source.slice(0, 100);
-  const description = text.slice(0, 300).trim();
   return { title, description };
 }
 

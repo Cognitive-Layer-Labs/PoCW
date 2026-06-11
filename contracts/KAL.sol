@@ -6,8 +6,10 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 
 /**
  * @title KAL — Knowledge as Liquidity
- * @notice ERC-20 token minted by the PoCW oracle when a learner earns an SBT.
- *         Only the oracle (owner) can mint. Standard ERC-20 transfers apply.
+ * @notice ERC-20 reward token. The owner is the PoCW_Controller, which mints KAL atomically
+ *         inside verifyAndMint() when a learner earns an SBT — so KAL can only be created through
+ *         a signed, expiring, nonce-protected oracle attestation. 100% goes to the learner
+ *         (no treasury cut / split). Standard ERC-20 transfers apply.
  */
 contract KAL is ERC20, Ownable {
     constructor() ERC20("Knowledge as Liquidity", "KAL") Ownable(msg.sender) {}

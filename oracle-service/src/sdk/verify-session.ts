@@ -39,8 +39,8 @@ import {
   saveCognitiveProfile,
   CognitiveProfile,
 } from "../services/metadata-store";
+import { parseEther } from "ethers";
 import { buildAttestation } from "./attestation";
-import { predictIRTParams } from "../services/predictor-client";
 import { getOracleAddress } from "../services/signer";
 import { getContent } from "./content-store";
 import {
@@ -55,6 +55,9 @@ import {
   POCW_DISCLAIMERS,
   configDifficultyToIRT,
 } from "./types";
+
+/** Fixed 4PL upper asymptote: max P(correct) even at high ability (models ~5% slip). */
+const IRT_D_CONSTANT = 0.95;
 
 interface QuestionEntry {
   question: string;
@@ -278,29 +281,31 @@ export class VerifySession {
     const bl = currentQ.bloomLevel;
     this.bloomCoverage[bl] = (this.bloomCoverage[bl] ?? 0) + 1;
 
-    // IRT update (2PL): combine LLM b with predictor b, use predictor a; d fixed by 2PL
-    const qIndex = this.questionHistory.length - 1;
-    const b_llm = this.targetDifficulties[qIndex] ?? 0;
-    const c = questionTypeC(currentQ.type);
+    // IRT update (4PL): a from contextual importance, b from the LLM's difficulty rating,
+    // c from question type, d a fixed constant. (No ML predictor — see PoCW/docs/OPTIONS.md.)
     const theta_before = this.irtState.theta;
 
-    // Call predictor sidecar (fire-and-forget style — don't block the session)
-    const predictorParams = await predictIRTParams(
-      currentQ.question,
-      currentQ.options ?? []
-    );
-    const b_combined = predictorParams
-      ? 0.85 * b_llm + 0.15 * predictorParams.b
-      : b_llm;
-    const a = predictorParams ? Math.max(0.5, Math.min(2.5, predictorParams.a)) : 1.0;
-    const d = predictorParams ? Math.max(0.75, Math.min(1.0, predictorParams.d)) : 0.95;
+    // b ← the LLM's own per-question difficulty rating. Clamp to the IRT engine's [-2,2] range
+    // and guard against NaN (a truncated-JSON parse can yield NaN), falling back to the target.
+    const b = Number.isFinite(currentQ.difficulty)
+      ? Math.max(-2, Math.min(2, currentQ.difficulty))
+      : (this.targetDifficulties[this.questionHistory.length - 1] ?? 0);
+    // c ← question type (guessing floor).
+    const c = questionTypeC(currentQ.type);
+    // a ← contextual importance of the target concept (KG importance, 0–1) → discrimination [0.5,2.5].
+    const importance = targetConceptId
+      ? this.conceptMastery.get(targetConceptId)?.importance ?? 0.5
+      : 0.5;
+    const a = Math.max(0.5, Math.min(2.5, 0.5 + 2.0 * importance));
+    // d ← fixed upper asymptote (models ~5% slip even at high ability).
+    const d = IRT_D_CONSTANT;
 
     this.irtState = updateAbility(
-      this.irtState, b_combined, a, c, d,
+      this.irtState, b, a, c, d,
       gradeResult.correct, gradeResult.score, currentQ.bloomLevel
     );
 
-    const irtParams = { a, b_llm, b_pred: predictorParams?.b ?? null, b_used: b_combined, c, d, theta_before };
+    const irtParams = { a, b, c, d, importance, theta_before };
 
     const questionNumber = this.questionHistory.length;
     const progress = {
@@ -410,12 +415,18 @@ export class VerifySession {
       console.warn("[verify-session] cognitive profile save failed:", err);
     }
 
-    // Step 3: Sign the attestation with the tokenUri included in the payload.
+    // KAL reward (100% to the learner) — computed BEFORE signing so it is bound into the
+    // attestation; the controller mints exactly this amount in verifyAndMint.
+    const kalAmount = passed ? calculateKAL(cognitiveProfile.scoreBreakdown) : 0;
+    const kalAmountWei = kalAmount > 0 ? parseEther(kalAmount.toFixed(18)).toString() : "0";
+
+    // Step 3: Sign the attestation with the tokenUri + kalAmount included in the payload.
     const attestation = await buildAttestation(
       this.config.attest,
       this.subject,
       this.contentId,
       score,
+      kalAmountWei,
       tokenUri,
       contentHash,
       this.config.chain
@@ -434,8 +445,6 @@ export class VerifySession {
       }));
     }
 
-    const kalAmount = passed ? calculateKAL(cognitiveProfile.scoreBreakdown) : undefined;
-
     return {
       competenceIndicator,
       score,
@@ -451,7 +460,7 @@ export class VerifySession {
       subject: this.subject,
       timestamp,
       tokenUri,
-      kalAmount,
+      kalAmount: kalAmount > 0 ? kalAmount : undefined,
       disclaimers: POCW_DISCLAIMERS,
     };
   }
