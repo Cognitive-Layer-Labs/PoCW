@@ -47,8 +47,16 @@ services:
       - FALKORDB_HOST=falkordb
       - FALKORDB_PORT=6379
       - REDIS_URL=redis://redis:6379/1
+      # Chain config — required for EIP-712 signing + on-chain access checks
       - RPC_URL=${RPC_URL:-}
+      - CHAIN_ID=${CHAIN_ID:-}
+      - DEPLOY_NETWORK=${DEPLOY_NETWORK:-base-sepolia}
+      - CONTROLLER_ADDRESS=${CONTROLLER_ADDRESS:-}
+      - SBT_ADDRESS=${SBT_ADDRESS:-}
       - KAL_ADDRESS=${KAL_ADDRESS:-}
+      - PAYWALL_ADDRESS=${PAYWALL_ADDRESS:-}
+      - ORACLE_ADDRESS=${ORACLE_ADDRESS:-}
+      - ADMIN_ADDRESS=${ADMIN_ADDRESS:-}
     volumes:
       - oracle_data:/app/data
     healthcheck:
