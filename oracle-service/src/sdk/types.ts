@@ -151,6 +151,8 @@ export interface ContentRow {
   kal_price: number | null;
   /** JSON-encoded UnlockRule (unlocked tier only). */
   unlock_rule: string | null;
+  /** 1 = hidden from the public catalog (admin toggle); 0/NULL = visible. */
+  hidden: number | null;
 }
 
 // ─── Verification Question ───────────────────────────────────────────────────

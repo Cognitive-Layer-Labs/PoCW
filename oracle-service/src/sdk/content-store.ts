@@ -40,11 +40,12 @@ ALTER TABLE content_index ADD COLUMN title TEXT;
 ALTER TABLE content_index ADD COLUMN description TEXT;
 `;
 
-// Migration: add access-control columns if they don't exist
+// Migration: add access-control + visibility columns if they don't exist
 const ADD_ACCESS_COLUMNS = [
   "ALTER TABLE content_index ADD COLUMN tier TEXT DEFAULT 'free'",
   "ALTER TABLE content_index ADD COLUMN kal_price INTEGER",
   "ALTER TABLE content_index ADD COLUMN unlock_rule TEXT",
+  "ALTER TABLE content_index ADD COLUMN hidden INTEGER DEFAULT 0",
 ];
 
 // ─── Write Queue — serializes all mutating calls to prevent SQLITE_BUSY ──
@@ -207,6 +208,42 @@ export async function updateAccess(
 }
 
 /**
+ * Show or hide a content entry from the public catalog (admin visibility toggle).
+ * Hidden entries stay fully indexed but are excluded from listContent by default.
+ */
+export async function setVisibility(knowledgeId: string, hidden: boolean): Promise<void> {
+  return runSerialized(() => {
+    getDb()
+      .prepare("UPDATE content_index SET hidden = ? WHERE knowledge_id = ?")
+      .run(hidden ? 1 : 0, knowledgeId);
+  });
+}
+
+/**
+ * Delete a content entry from the catalog. Returns true if a row was removed.
+ * Caller cascades to FalkorDB (deleteGraph) and the in-memory content cache.
+ */
+export async function deleteContent(knowledgeId: string): Promise<boolean> {
+  return runSerialized(() => {
+    const result = getDb()
+      .prepare("DELETE FROM content_index WHERE knowledge_id = ?")
+      .run(knowledgeId);
+    return result.changes > 0;
+  });
+}
+
+/**
+ * Delete ALL content entries (full reset). Returns the number of rows removed.
+ * Caller cascades to FalkorDB (wipeAllGraphs) and clears the content cache.
+ */
+export async function wipeAllContent(): Promise<number> {
+  return runSerialized(() => {
+    const result = getDb().prepare("DELETE FROM content_index").run();
+    return result.changes;
+  });
+}
+
+/**
  * List all indexed content, ordered by most recent.
  * Returns paginated results.
  */
@@ -214,12 +251,21 @@ export function listContent(options?: {
   status?: string;
   limit?: number;
   offset?: number;
+  /** Include hidden entries (admin views). Default false → public catalog excludes hidden. */
+  includeHidden?: boolean;
 }): { rows: ContentRow[]; total: number } {
-  const { status, limit = 50, offset = 0 } = options || {};
+  const { status, limit = 50, offset = 0, includeHidden = false } = options || {};
   const db = getDb();
 
-  const where = status ? "WHERE status = ?" : "";
-  const params = status ? [status] : [];
+  const conditions: string[] = [];
+  const params: (string | number)[] = [];
+  if (status) {
+    conditions.push("status = ?");
+    params.push(status);
+  }
+  // Legacy rows predate the `hidden` column → NULL is treated as visible.
+  if (!includeHidden) conditions.push("(hidden IS NULL OR hidden = 0)");
+  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
 
   const total = db
     .prepare(`SELECT COUNT(*) as count FROM content_index ${where}`)

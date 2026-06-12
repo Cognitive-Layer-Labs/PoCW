@@ -9,6 +9,7 @@ import { getFullGraph, isFalkorAvailable } from "./services/kg-store";
 import { getContent, updateMetadata, updateAccess, listContent as storeListContent } from "./sdk/content-store";
 import { checkHasPaid, checkHoldsPrereqSBT, signPriceQuote } from "./services/access-guard";
 import { rederiveTitle } from "./services/parser";
+import { requireAdminAction } from "./services/admin-auth";
 import { initAttestationStore, saveAttestation, getAttestation, listAttestationsBySubject } from "./services/attestation-store";
 import { buildAttestation } from "./sdk/attestation";
 import { controllerAddress as cfgController, sbtAddress as cfgSbt } from "./services/chain-config";
@@ -27,7 +28,7 @@ const app = express();
 app.use((req: Request, res: Response, next: NextFunction): void => {
   const origin = process.env.CORS_ORIGIN ?? "http://localhost:3001";
   res.header("Access-Control-Allow-Origin", origin);
-  res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS");
   res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
   if (req.method === "OPTIONS") {
     res.sendStatus(204);
@@ -590,7 +591,7 @@ function requireAdmin(req: Request, res: Response, next: NextFunction): void {
  */
 app.get("/api/admin/access", requireAdmin, (_req: Request, res: Response) => {
   try {
-    const { rows } = storeListContent({ limit: 200 });
+    const { rows } = storeListContent({ limit: 200, includeHidden: true });
     const items = rows.map((r) => ({
       knowledgeId: r.knowledge_id,
       contentId: r.content_id,
@@ -600,6 +601,7 @@ app.get("/api/admin/access", requireAdmin, (_req: Request, res: Response) => {
       tier: r.tier ?? "free",
       kalPrice: r.kal_price ?? null,
       unlockRule: r.unlock_rule ? JSON.parse(r.unlock_rule) : null,
+      hidden: (r.hidden ?? 0) === 1,
     }));
     return res.json({ items });
   } catch (err) {
@@ -644,6 +646,92 @@ app.patch("/api/admin/access/:knowledgeId", requireAdmin, async (req: Request, r
     return sendError(res, err);
   }
 });
+
+/**
+ * PATCH /api/admin/content/:knowledgeId/visibility
+ * Show or hide a resource from the public catalog. Non-destructive + reversible, so it stays on
+ * the cosmetic admin gate (no signature required).
+ * Body: { hidden: boolean }
+ */
+app.patch("/api/admin/content/:knowledgeId/visibility", requireAdmin, async (req: Request, res: Response) => {
+  const { knowledgeId } = req.params;
+  const { hidden } = req.body ?? {};
+  if (typeof hidden !== "boolean") {
+    return res.status(400).json({ error: "hidden (boolean) is required", code: "INVALID_CONFIG" });
+  }
+  if (!getContent(knowledgeId)) {
+    return res.status(404).json({ error: "Content not found", code: "CONTENT_NOT_FOUND" });
+  }
+  try {
+    await getPoCW().setVisibility(knowledgeId, hidden);
+    return res.json({ knowledgeId, hidden });
+  } catch (err) {
+    return sendError(res, err);
+  }
+});
+
+/**
+ * DELETE /api/admin/content/:knowledgeId
+ * Cascade-delete a resource (FalkorDB graph + content row + cache). Earned SBTs/attestations are
+ * preserved. Requires an EIP-712 admin signature in body._admin.
+ */
+app.delete(
+  "/api/admin/content/:knowledgeId",
+  requireAdminAction("delete", (req) => req.params.knowledgeId),
+  async (req: Request, res: Response) => {
+    const { knowledgeId } = req.params;
+    if (!getContent(knowledgeId)) {
+      return res.status(404).json({ error: "Content not found", code: "CONTENT_NOT_FOUND" });
+    }
+    try {
+      const result = await getPoCW().deleteResource(knowledgeId);
+      return res.json({ deleted: true, ...result });
+    } catch (err) {
+      return sendError(res, err);
+    }
+  }
+);
+
+/**
+ * POST /api/admin/content/:knowledgeId/reindex
+ * Drop the existing graph and re-run indexing from the original source. Returns 202 + Retry-After;
+ * poll GET /api/index/:knowledgeId for completion. Requires an EIP-712 admin signature.
+ */
+app.post(
+  "/api/admin/content/:knowledgeId/reindex",
+  requireAdminAction("reindex", (req) => req.params.knowledgeId),
+  async (req: Request, res: Response) => {
+    const { knowledgeId } = req.params;
+    if (!getContent(knowledgeId)) {
+      return res.status(404).json({ error: "Content not found", code: "CONTENT_NOT_FOUND" });
+    }
+    try {
+      const result = await getPoCW().reindexResource(knowledgeId);
+      res.set("Retry-After", "5");
+      return res.status(202).json(result);
+    } catch (err) {
+      return sendError(res, err);
+    }
+  }
+);
+
+/**
+ * POST /api/admin/wipe
+ * Wipe ALL resources (every graph + content row + cache). Attestations preserved.
+ * Requires an EIP-712 admin signature over action="wipe", target="*".
+ */
+app.post(
+  "/api/admin/wipe",
+  requireAdminAction("wipe", () => "*"),
+  async (_req: Request, res: Response) => {
+    try {
+      const result = await getPoCW().wipeAll();
+      return res.json({ wiped: true, ...result });
+    } catch (err) {
+      return sendError(res, err);
+    }
+  }
+);
 
 // ─── Access Quote ─────────────────────────────────────────────────────────────
 

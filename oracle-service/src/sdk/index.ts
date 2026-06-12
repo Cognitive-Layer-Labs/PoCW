@@ -9,7 +9,7 @@
 import { createHash } from "crypto";
 import { parseContentToText, parseWebContentWithTitle, chunkText, isYouTubeStrict, extractYouTubeId } from "../services/parser";
 import { extractKnowledgeGraph } from "../services/kg-builder";
-import { storeGraph, graphExists, initFalkorDB, closeFalkorDB } from "../services/kg-store";
+import { storeGraph, graphExists, initFalkorDB, closeFalkorDB, deleteGraph, wipeAllGraphs } from "../services/kg-store";
 import { contentUrlToId } from "../services/session-manager";
 import {
   initContentStore,
@@ -23,6 +23,9 @@ import {
   recoverStuckIndexingJobs,
   updateMetadata,
   listContent,
+  deleteContent,
+  wipeAllContent,
+  setVisibility as setContentVisibility,
 } from "./content-store";
 import { VerifySession } from "./verify-session";
 import {
@@ -82,6 +85,10 @@ class LRUCache<K, V> {
       if (firstKey !== undefined) this.map.delete(firstKey);
     }
     this.map.set(k, v);
+  }
+
+  delete(k: K): void {
+    this.map.delete(k);
   }
 
   clear(): void {
@@ -196,6 +203,7 @@ class PoCW {
     status?: string;
     limit?: number;
     offset?: number;
+    includeHidden?: boolean;
   }): { rows: ContentRow[]; total: number } {
     this.ensureInit();
     return listContent(options);
@@ -287,6 +295,76 @@ class PoCW {
     }
 
     return session;
+  }
+
+  // ─── Admin operations ──────────────────────────────────────────────────────
+
+  /**
+   * Show or hide a resource from the public catalog. Reversible; does not touch the graph.
+   */
+  async setVisibility(knowledgeId: string, hidden: boolean): Promise<void> {
+    this.ensureInit();
+    if (!getContent(knowledgeId)) {
+      throw new PoCWError("CONTENT_NOT_FOUND", `No content for knowledge ID: ${knowledgeId}`);
+    }
+    await setContentVisibility(knowledgeId, hidden);
+  }
+
+  /**
+   * Cascade-delete a resource: removes its FalkorDB graph, its content-store row, and the
+   * cached chunks. On-chain SBTs and earned attestations are intentionally preserved.
+   */
+  async deleteResource(
+    knowledgeId: string
+  ): Promise<{ knowledgeId: string; contentId: number | null; nodesDeleted: number }> {
+    this.ensureInit();
+    const row = getContent(knowledgeId);
+    if (!row) {
+      throw new PoCWError("CONTENT_NOT_FOUND", `No content for knowledge ID: ${knowledgeId}`);
+    }
+    const contentId = row.content_id;
+    const nodesDeleted = contentId != null ? await deleteGraph(contentId) : 0;
+    await deleteContent(knowledgeId);
+    contentCache.delete(knowledgeId);
+    indexingJobs.delete(knowledgeId);
+    return { knowledgeId, contentId, nodesDeleted };
+  }
+
+  /**
+   * Re-index a resource from its original source: drops the existing graph and re-runs the
+   * indexing pipeline in the background. Returns immediately with status 'indexing'.
+   */
+  async reindexResource(knowledgeId: string): Promise<IndexResult> {
+    this.ensureInit();
+    const row = getContent(knowledgeId);
+    if (!row) {
+      throw new PoCWError("CONTENT_NOT_FOUND", `No content for knowledge ID: ${knowledgeId}`);
+    }
+    const contentId = row.content_id ?? contentUrlToId(normalizeSource(row.source));
+    // Drop the old graph so runIndexing rebuilds cleanly (storeGraph MERGEs, so stale nodes
+    // would otherwise linger). Evict cached chunks to force a fresh re-parse from source.
+    await deleteGraph(contentId);
+    contentCache.delete(knowledgeId);
+    await markIndexing(knowledgeId);
+
+    const job = this.runIndexing(knowledgeId, row.source, contentId);
+    indexingJobs.set(knowledgeId, job);
+    job.finally(() => indexingJobs.delete(knowledgeId));
+
+    return { knowledgeId, status: "indexing", contentId };
+  }
+
+  /**
+   * Wipe ALL resources: clears every FalkorDB graph and every content-store row, and empties
+   * the content cache. Attestations are preserved. Returns counts removed.
+   */
+  async wipeAll(): Promise<{ contentRemoved: number; nodesRemoved: number }> {
+    this.ensureInit();
+    const nodesRemoved = await wipeAllGraphs();
+    const contentRemoved = await wipeAllContent();
+    contentCache.clear();
+    indexingJobs.clear();
+    return { contentRemoved, nodesRemoved };
   }
 
   /** Close all connections. */

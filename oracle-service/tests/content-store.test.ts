@@ -2,14 +2,16 @@ import { expect } from "chai";
 import Database from "better-sqlite3";
 import {
   __setDbForTest,
-  initContentStore,
   getContent,
   insertContent,
   markIndexing,
   markReady,
   markFailed,
   incrementUsage,
-  closeContentStore,
+  listContent,
+  setVisibility,
+  deleteContent,
+  wipeAllContent,
 } from "../src/sdk/content-store";
 
 describe("Content Store (SQLite)", () => {
@@ -32,7 +34,8 @@ describe("Content Store (SQLite)", () => {
         created_at    TEXT NOT NULL DEFAULT (datetime('now')),
         indexed_at    TEXT,
         usage_count   INTEGER DEFAULT 0,
-        last_used_at  TEXT
+        last_used_at  TEXT,
+        hidden        INTEGER DEFAULT 0
       );
     `);
     __setDbForTest(db);
@@ -44,8 +47,8 @@ describe("Content Store (SQLite)", () => {
   });
 
   describe("insertContent()", () => {
-    it("inserts a new content entry", () => {
-      const inserted = insertContent("abc123", "url", "https://example.com", 42);
+    it("inserts a new content entry", async () => {
+      const inserted = await insertContent("abc123", "url", "https://example.com", 42);
       expect(inserted).to.be.true;
 
       const row = getContent("abc123");
@@ -57,9 +60,9 @@ describe("Content Store (SQLite)", () => {
       expect(row!.status).to.equal("pending");
     });
 
-    it("is idempotent — second insert returns false", () => {
-      insertContent("abc123", "url", "https://example.com", 42);
-      const second = insertContent("abc123", "url", "https://example.com", 42);
+    it("is idempotent — second insert returns false", async () => {
+      await insertContent("abc123", "url", "https://example.com", 42);
+      const second = await insertContent("abc123", "url", "https://example.com", 42);
       expect(second).to.be.false;
     });
   });
@@ -71,18 +74,18 @@ describe("Content Store (SQLite)", () => {
   });
 
   describe("status transitions", () => {
-    beforeEach(() => {
-      insertContent("k1", "url", "https://test.com", 1);
+    beforeEach(async () => {
+      await insertContent("k1", "url", "https://test.com", 1);
     });
 
-    it("pending → indexing", () => {
-      markIndexing("k1");
+    it("pending → indexing", async () => {
+      await markIndexing("k1");
       expect(getContent("k1")!.status).to.equal("indexing");
     });
 
-    it("indexing → ready", () => {
-      markIndexing("k1");
-      markReady("k1", "hash123", 10);
+    it("indexing → ready", async () => {
+      await markIndexing("k1");
+      await markReady("k1", "hash123", 10);
       const row = getContent("k1")!;
       expect(row.status).to.equal("ready");
       expect(row.content_hash).to.equal("hash123");
@@ -90,9 +93,9 @@ describe("Content Store (SQLite)", () => {
       expect(row.indexed_at).to.not.be.null;
     });
 
-    it("indexing → failed", () => {
-      markIndexing("k1");
-      markFailed("k1", "Parse error");
+    it("indexing → failed", async () => {
+      await markIndexing("k1");
+      await markFailed("k1", "Parse error");
       const row = getContent("k1")!;
       expect(row.status).to.equal("failed");
       expect(row.error).to.equal("Parse error");
@@ -100,15 +103,64 @@ describe("Content Store (SQLite)", () => {
   });
 
   describe("incrementUsage()", () => {
-    it("increments usage count and sets last_used_at", () => {
-      insertContent("k1", "url", "https://test.com", 1);
-      incrementUsage("k1");
+    it("increments usage count and sets last_used_at", async () => {
+      await insertContent("k1", "url", "https://test.com", 1);
+      await incrementUsage("k1");
       const row1 = getContent("k1")!;
       expect(row1.usage_count).to.equal(1);
       expect(row1.last_used_at).to.not.be.null;
 
-      incrementUsage("k1");
+      await incrementUsage("k1");
       expect(getContent("k1")!.usage_count).to.equal(2);
+    });
+  });
+
+  describe("setVisibility() + listContent() hidden filter", () => {
+    beforeEach(async () => {
+      await insertContent("vis1", "url", "https://a.com", 1);
+      await insertContent("vis2", "url", "https://b.com", 2);
+    });
+
+    it("hides an entry from the default catalog but keeps it for admin", async () => {
+      await setVisibility("vis1", true);
+      expect(getContent("vis1")!.hidden).to.equal(1);
+
+      const publicIds = listContent().rows.map((r) => r.knowledge_id);
+      expect(publicIds).to.not.include("vis1");
+      expect(publicIds).to.include("vis2");
+
+      const adminIds = listContent({ includeHidden: true }).rows.map((r) => r.knowledge_id);
+      expect(adminIds).to.include("vis1");
+    });
+
+    it("unhides an entry", async () => {
+      await setVisibility("vis1", true);
+      await setVisibility("vis1", false);
+      expect(getContent("vis1")!.hidden).to.equal(0);
+      expect(listContent().rows.map((r) => r.knowledge_id)).to.include("vis1");
+    });
+  });
+
+  describe("deleteContent()", () => {
+    it("removes a single entry and returns true", async () => {
+      await insertContent("del1", "url", "https://a.com", 1);
+      const removed = await deleteContent("del1");
+      expect(removed).to.be.true;
+      expect(getContent("del1")).to.be.null;
+    });
+
+    it("returns false when nothing was deleted", async () => {
+      expect(await deleteContent("missing")).to.be.false;
+    });
+  });
+
+  describe("wipeAllContent()", () => {
+    it("removes every entry and returns the count", async () => {
+      await insertContent("w1", "url", "https://a.com", 1);
+      await insertContent("w2", "url", "https://b.com", 2);
+      const count = await wipeAllContent();
+      expect(count).to.equal(2);
+      expect(listContent({ includeHidden: true }).total).to.equal(0);
     });
   });
 });

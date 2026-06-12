@@ -161,6 +161,38 @@ export async function storeGraph(kg: KnowledgeGraph): Promise<void> {
 }
 
 /**
+ * Delete the entire knowledge graph for a contentId (all :Concept nodes + their edges).
+ * Returns the number of concept nodes removed. No-op (returns 0) when FalkorDB is unavailable.
+ */
+export async function deleteGraph(contentId: number): Promise<number> {
+  if (!falkorAvailable) return 0;
+  const g = await getGraph();
+  const countRes = await g.query<R>(
+    "MATCH (c:Concept {contentId: $contentId}) RETURN count(c) AS cnt",
+    { params: { contentId } }
+  );
+  const cnt = ((countRes.data ?? [])[0]?.cnt ?? 0) as number;
+  await g.query(
+    "MATCH (c:Concept {contentId: $contentId}) DETACH DELETE c",
+    { params: { contentId } }
+  );
+  return cnt;
+}
+
+/**
+ * Wipe the ENTIRE graph (every node + edge). Returns the number of concept nodes removed.
+ * No-op (returns 0) when FalkorDB is unavailable.
+ */
+export async function wipeAllGraphs(): Promise<number> {
+  if (!falkorAvailable) return 0;
+  const g = await getGraph();
+  const countRes = await g.query<R>("MATCH (c:Concept) RETURN count(c) AS cnt");
+  const cnt = ((countRes.data ?? [])[0]?.cnt ?? 0) as number;
+  await g.query("MATCH (n) DETACH DELETE n");
+  return cnt;
+}
+
+/**
  * Retrieve the full knowledge graph for a contentId.
  */
 export async function getFullGraph(contentId: number): Promise<KnowledgeGraph> {
