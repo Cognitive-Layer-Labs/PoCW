@@ -1,10 +1,13 @@
 {
   "chainId": 84532,
   "network": "base-sepolia",
-  "controllerAddress": "0xC327B012811d88A27817fc7159A0a57Fb503e2AD",
-  "sbtAddress": "0x9E75B497411f3Eb85018591Ec865B82cC2B6409F",
+  "controllerAddress": "0xb3c4EA4B31De3132eebC47328b77EcE4338aB6b1",
+  "sbtAddress": "0xac96244fb1511418Cad4174C8Ef2569b12ec9d22",
+  "kalAddress": "0x6eA54912201255FfF4F367c5208D1dA67473268D",
+  "paywallAddress": "0x2B3A54483Ce82f33dd6e8264dbC1302E2a8A49a4",
   "oracleAddress": "0x9999993d516110b70140e4077fecdd55e5cbf777",
+  "treasury": "0xBA651c1CafeF674EAE4cAb2c4d701020e15064e9",
   "strictSender": true,
-  "deployedAt": "2026-04-16T19:13:53.479Z",
+  "deployedAt": "2026-06-12T09:04:05.236Z",
   "deployer": "0xBA651c1CafeF674EAE4cAb2c4d701020e15064e9"
 }
