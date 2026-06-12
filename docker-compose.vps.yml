@@ -47,6 +47,10 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    ports:
+      # Expose the oracle on the host loopback so a host-level reverse proxy (nginx) can
+      # forward a public domain to it. Harmless when the bundled compose nginx fronts it instead.
+      - "127.0.0.1:3000:3000"
     environment:
       - NODE_ENV=production
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
