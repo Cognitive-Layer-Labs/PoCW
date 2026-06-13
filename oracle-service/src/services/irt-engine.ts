@@ -1,7 +1,8 @@
 /**
- * KAQG-CAT IRT Engine (4PL, bloom-weighted MAP)
+ * KAQG-CAT IRT Engine (4PL MAP)
  *
- * Ability estimation via bloom-weighted 4PL MAP Newton-Raphson.
+ * Ability estimation via standard (unweighted) 4PL MAP Newton-Raphson.
+ * Bloom weights affect ONLY the KAL reward (see calculateKAL), never θ/SE.
  * Item selection via concept mastery loop:
  *   1. Re-ask failed important concepts (different edge direction each retry).
  *   2. Ask highest-importance untested concept.
@@ -88,16 +89,16 @@ export function probability(theta: number, b: number, a = 1.0, c = 0.0, d = 1.0)
 }
 
 function fisherInfo4PL(
-  theta: number, b: number, a: number, c: number, d: number, bloomWeight: number
+  theta: number, b: number, a: number, c: number, d: number
 ): number {
   const p = probability(theta, b, a, c, d);
   if (p <= c + 1e-9 || p >= d - 1e-9 || p <= 0 || p >= 1) return 0;
   // dP/dθ = a*(P−c)*(d−P)/(d−c)
   const dPdt = a * (p - c) * (d - p) / (d - c);
-  return bloomWeight * (dPdt * dPdt) / (p * (1 - p));
+  return (dPdt * dPdt) / (p * (1 - p));
 }
 
-// ─── MAP estimation (bloom-weighted 4PL) ─────────────────────────────────────
+// ─── MAP estimation (unweighted 4PL) ────────────────────────────────────────
 
 function estimateTheta(responses: IRTResponse[], initialTheta: number): number {
   if (responses.length === 0) return 0;
@@ -125,9 +126,8 @@ function estimateTheta(responses: IRTResponse[], initialTheta: number): number {
       if (p <= r.c + 1e-9 || p >= r.d - 1e-9 || p <= 0 || p >= 1) continue;
       const dPdt = r.a * (p - r.c) * (r.d - p) / (r.d - r.c);
       const u = r.correct ? 1 : 0;
-      const w = r.bloomWeight;
-      grad += w * (u - p) * dPdt / (p * (1 - p));
-      hess -= w * (dPdt * dPdt)  / (p * (1 - p));
+      grad += (u - p) * dPdt / (p * (1 - p));
+      hess -= (dPdt * dPdt)  / (p * (1 - p));
     }
 
     // N(0,1) prior
@@ -151,7 +151,7 @@ function calculateSE(theta: number, responses: IRTResponse[]): number {
   if (responses.length === 0) return Infinity;
   let info = 1; // prior
   for (const r of responses) {
-    info += fisherInfo4PL(theta, r.difficulty, r.a, r.c, r.d, r.bloomWeight);
+    info += fisherInfo4PL(theta, r.difficulty, r.a, r.c, r.d);
   }
   return info < 1e-10 ? Infinity : 1 / Math.sqrt(info);
 }

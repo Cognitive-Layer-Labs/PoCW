@@ -45,6 +45,7 @@ contract PoCW_Controller is EIP712 {
     bool public immutable strictSender;
 
     mapping(bytes32 => bool) public usedNonces;
+    mapping(uint256 => bool) public kalClaimed;
 
     bytes32 private constant ATTESTATION_TYPEHASH = keccak256(
         "Attestation(address user,uint256 contentId,uint256 score,uint256 kalAmount,uint256 expiry,bytes32 nonce,bytes32 tokenUriHash)"
@@ -137,7 +138,10 @@ contract PoCW_Controller is EIP712 {
         }
 
         // KAL reward — 100% to the learner, no treasury/split.
-        if (kalAmount > 0) {
+        // Paid at most once per (user, content): reattest can refresh the SBT
+        // metadata but must not re-mint the reward.
+        if (kalAmount > 0 && !kalClaimed[tokenId]) {
+            kalClaimed[tokenId] = true;
             IKAL(kalToken).mint(user, kalAmount);
         }
 

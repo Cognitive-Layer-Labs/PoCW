@@ -56,8 +56,9 @@ import {
   configDifficultyToIRT,
 } from "./types";
 
-/** Fixed 4PL upper asymptote: max P(correct) even at high ability (models ~5% slip). */
-const IRT_D_CONSTANT = 0.95;
+/** Fixed 4PL upper asymptote: P(correct) reaches 1.0 at high ability (keeps the
+ *  (theta+2)/4*100 score projection self-consistent). */
+const IRT_D_CONSTANT = 1.0;
 
 interface QuestionEntry {
   question: string;
@@ -297,7 +298,7 @@ export class VerifySession {
       ? this.conceptMastery.get(targetConceptId)?.importance ?? 0.5
       : 0.5;
     const a = Math.max(0.5, Math.min(2.5, 0.5 + 2.0 * importance));
-    // d ← fixed upper asymptote (models ~5% slip even at high ability).
+    // d ← fixed upper asymptote (1.0: P(correct)→1 at high ability).
     const d = IRT_D_CONSTANT;
 
     this.irtState = updateAbility(
