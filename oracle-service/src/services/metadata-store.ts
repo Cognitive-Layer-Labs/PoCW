@@ -60,12 +60,24 @@ const DATA_DIR = path.resolve(__dirname, "..", "..", "data", "profiles");
 // On-chain SVG logo (data URI) — self-contained, renders in explorers/wallets without an
 // external host. Matches the PoCW collection brand (see PoCW_SBT.contractURI()).
 const LOGO_SVG =
-  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">' +
-  '<rect width="200" height="200" rx="16" fill="#0c0c12"/>' +
-  '<text x="100" y="68" text-anchor="middle" font-family="monospace" font-size="22" fill="#F92672" font-weight="bold" letter-spacing="2">PoCW</text>' +
-  '<circle cx="100" cy="118" r="40" fill="none" stroke="#F92672" stroke-width="3"/>' +
-  '<text x="100" y="114" text-anchor="middle" font-family="monospace" font-size="11" fill="#94a3b8">Proof of</text>' +
-  '<text x="100" y="130" text-anchor="middle" font-family="monospace" font-size="11" fill="#94a3b8">Cognitive Work</text>' +
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 680">' +
+  '<rect width="680" height="680" fill="#0c0c12"/>' +
+  '<polygon points="340,181 478,260 478,420 340,499 202,420 202,260" fill="none" stroke="#F92672" stroke-width="1.5" opacity="0.22"/>' +
+  '<polygon points="340,253 415,296 415,384 340,427 265,384 265,296" fill="none" stroke="#F92672" stroke-width="1" opacity="0.10"/>' +
+  '<line x1="340" y1="340" x2="340" y2="50" stroke="#66D9EF" stroke-width="1.5" opacity="0.38"/>' +
+  '<line x1="340" y1="340" x2="591" y2="485" stroke="#A6E22E" stroke-width="1.5" opacity="0.38"/>' +
+  '<line x1="340" y1="340" x2="89" y2="485" stroke="#AE81FF" stroke-width="1.5" opacity="0.38"/>' +
+  '<polygon points="340,61 581,202 581,478 340,619 99,478 99,202" fill="none" stroke="#F92672" stroke-width="2" opacity="0.35"/>' +
+  '<polygon points="340,50 591,195 591,485 340,630 89,485 89,195" fill="none" stroke="#F92672" stroke-width="8"/>' +
+  '<circle cx="340" cy="50" r="12" fill="#66D9EF"/><circle cx="340" cy="50" r="5" fill="#0c0c12"/>' +
+  '<circle cx="591" cy="195" r="12" fill="#A6E22E"/><circle cx="591" cy="195" r="5" fill="#0c0c12"/>' +
+  '<circle cx="591" cy="485" r="12" fill="#AE81FF"/><circle cx="591" cy="485" r="5" fill="#0c0c12"/>' +
+  '<circle cx="340" cy="630" r="12" fill="#66D9EF"/><circle cx="340" cy="630" r="5" fill="#0c0c12"/>' +
+  '<circle cx="89" cy="485" r="12" fill="#A6E22E"/><circle cx="89" cy="485" r="5" fill="#0c0c12"/>' +
+  '<circle cx="89" cy="195" r="12" fill="#AE81FF"/><circle cx="89" cy="195" r="5" fill="#0c0c12"/>' +
+  '<text x="340" y="348" text-anchor="middle" font-family="monospace" font-size="112" fill="#F92672" font-weight="bold" letter-spacing="5">PoCW</text>' +
+  '<text x="340" y="395" text-anchor="middle" font-family="monospace" font-size="25" fill="#64748b" letter-spacing="13">SOULBOUND</text>' +
+  '<text x="340" y="448" text-anchor="middle" font-family="monospace" font-size="16" fill="#F92672" opacity="0.45" letter-spacing="24">&#9670; &#9670; &#9670;</text>' +
   '</svg>';
 const TOKEN_IMAGE_URL = `data:image/svg+xml;base64,${Buffer.from(LOGO_SVG).toString("base64")}`;
 
