@@ -64,35 +64,47 @@ export const IMPORTANT_CONCEPT_THRESHOLD = 0.65;
 export const MIN_IMPORTANT_CONCEPTS = 3;
 
 /**
- * config.difficulty (0–1) → additive offset on every item target b_target:
+ * Item target (concept-mastery and Fisher mode alike):
  *
- *   offset = DIFFICULTY_OFFSET_SCALE × (difficulty − DIFFICULTY_NEUTRAL)
+ *   b_target = clamp(offset + IMPORTANCE_WEIGHT × (importance − 0.5) + THETA_WEIGHT × θ, −2, 2)
+ *   offset   = DIFFICULTY_OFFSET_SCALE × (difficulty − DIFFICULTY_NEUTRAL)     (config.difficulty)
  *
- *   difficulty 0.20 (easy)   → −1.20
- *   difficulty 0.40 (medium) → −0.60
- *   difficulty 0.50 (default)→ −0.30
- *   difficulty 0.65 (hard)   → +0.15
- *   range 0 … 1              → −1.80 … +1.20
+ *   difficulty 0.20 (easy)    → offset −0.875
+ *   difficulty 0.40 (medium)  → offset −0.375
+ *   difficulty 0.50 (default) → offset −0.125
+ *   difficulty 0.65 (hard)    → offset +0.25
+ *   range 0 … 1               → −1.375 … +1.125
  *
- * Why these numbers: at θ = 0 the untuned target is (importance − 0.5) × 1.5, and important
- * concepts have importance ≥ 0.65, so first targets sit at +0.2…+0.75 (Apply/Analyze, MCQ/open).
- * −1.2 moves an easy session to −1.0…−0.45 (Remember/Understand; true/false, some MCQ), −0.6 moves
- * a medium one to −0.4…+0.15 (Understand/Apply, MCQ) and +0.15 keeps hard roughly where the engine
- * always started (Apply/Analyze, rising to Evaluate as answers come in). The offset is constant
- * for the session, so θ still moves the target up or down after every answer (the offset only
- * shifts where the adaptive walk is centred). Targets are clamped to [−2, 2].
+ * Why θ is damped (THETA_WEIGHT 0.5) instead of added in full: for an all-correct learner the
+ * ability estimate is θ = (hardest item answered) + up to 1.0, so with b_target = θ + … every
+ * correct answer raised the next target by ~0.35–1.0 on top of the previous one — medium reached
+ * Evaluate/Create by question 4–5 and hard reached Create by question 2. With half of θ the
+ * target converges instead of compounding: the setting fixes the centre of the band and θ moves
+ * the target at most ±1 around it, in both directions (adaptivity kept). The importance term
+ * (formerly × 1.5, always positive for important concepts and compounding through θ) is reduced
+ * to a small nudge towards harder items for more central concepts.
+ *
+ * Simulated (LLM rating anchored per ITEM_DIFFICULTY_MAX_DEVIATION, 10 questions):
+ *   easy   — strong learner: Understand (true/false, then MCQ); weak: Remember.
+ *   medium — strong learner: Understand → Apply, never past Apply within 5 questions; mixed:
+ *            Understand/Apply.
+ *   hard   — strong learner: Apply → Analyze → Evaluate from question 3–4, Create not reachable
+ *            (max target at θ = 2 is ≈ 1.45); weak: Apply → Understand.
+ * Create is only reachable at difficulty ≳ 0.7. Targets are clamped to [−2, 2].
  */
-export const DIFFICULTY_NEUTRAL = 0.6;
-export const DIFFICULTY_OFFSET_SCALE = 3.0;
+export const DIFFICULTY_NEUTRAL = 0.55;
+export const DIFFICULTY_OFFSET_SCALE = 2.5;
+export const THETA_WEIGHT = 0.5;
+export const IMPORTANCE_WEIGHT = 0.3;
 
 /**
  * The item difficulty b fed to the IRT update is the LLM's own rating, but only within
  * ±ITEM_DIFFICULTY_MAX_DEVIATION (half a Bloom band) of the target it was generated for.
  * Uncalibrated LLM ratings drift (a live run rated every question 1.0 whatever the target), and an
  * unanchored b of 1.0 makes even wrong answers push θ up, which ratchets the session towards
- * Evaluate/Create. Simulated easy sessions with an LLM that always says 1.0 stay on
- * Understand/Apply (TF/MCQ) over 10 questions with ±0.25, but drift to Analyze/open by
- * question 4 with ±0.5 — so the LLM may nudge b, not move it.
+ * Evaluate/Create. (Simulated with the original undamped target, easy sessions with an LLM that
+ * always says 1.0 stayed on Understand/Apply over 10 questions with ±0.25 but drifted to
+ * Analyze/open by question 4 with ±0.5.) The LLM may nudge b, not move it.
  */
 export const ITEM_DIFFICULTY_MAX_DEVIATION = 0.25;
 
@@ -126,15 +138,26 @@ function estimateTheta(responses: IRTResponse[], initialTheta: number): number {
   const allCorrect = responses.every(r => r.correct);
   const allWrong   = responses.every(r => !r.correct);
 
+  // All-correct / all-wrong: bounded heuristic around the hardest / easiest item, but never less
+  // extreme than the MAP estimate in the direction of the evidence. Without that bound a wrong
+  // answer on a moderately hard item (b = 0.6 → θ = 0.25) raised θ above the prior, and a correct
+  // answer on an easy item lowered it, so the next item moved the wrong way.
   if (allCorrect) {
     const maxB = Math.max(...responses.map(r => r.difficulty));
-    return Math.min(2, maxB + Math.min(0.5 * Math.log(responses.length + 1), 1.0));
+    const heuristic = Math.min(2, maxB + Math.min(0.5 * Math.log(responses.length + 1), 1.0));
+    return Math.max(heuristic, mapTheta(responses, initialTheta));
   }
   if (allWrong) {
     const minB = Math.min(...responses.map(r => r.difficulty));
-    return Math.max(-2, minB - Math.min(0.5 * Math.log(responses.length + 1), 1.0));
+    const heuristic = Math.max(-2, minB - Math.min(0.5 * Math.log(responses.length + 1), 1.0));
+    return Math.min(heuristic, mapTheta(responses, initialTheta));
   }
 
+  return mapTheta(responses, initialTheta);
+}
+
+/** MAP estimate (N(0,1) prior) by Newton-Raphson, clamped to [−2, 2]. */
+function mapTheta(responses: IRTResponse[], initialTheta: number): number {
   let theta = initialTheta;
 
   for (let iter = 0; iter < NEWTON_RAPHSON_ITERATIONS; iter++) {
@@ -210,7 +233,7 @@ export function updateAbility(
 
 const clampB = (b: number): number => Math.max(-2, Math.min(2, b));
 
-/** Target-difficulty offset for config.difficulty (0–1). See DIFFICULTY_NEUTRAL for the mapping. */
+/** Target-difficulty offset for config.difficulty (0–1). See THETA_WEIGHT for the mapping. */
 export function difficultyOffset(difficulty: number | undefined): number {
   if (typeof difficulty !== "number" || !Number.isFinite(difficulty)) return 0;
   const d = Math.max(0, Math.min(1, difficulty));
@@ -228,6 +251,12 @@ export function anchorItemDifficulty(rated: number | undefined, target: number):
   return clampB(Math.max(t - ITEM_DIFFICULTY_MAX_DEVIATION, Math.min(t + ITEM_DIFFICULTY_MAX_DEVIATION, rated)));
 }
 
+/** Target difficulty for the next item (see THETA_WEIGHT for the formula and its rationale). */
+export function itemTarget(theta: number, importance: number | null, offset = 0): number {
+  const nudge = importance == null ? 0 : IMPORTANCE_WEIGHT * (importance - 0.5);
+  return clampB(offset + nudge + THETA_WEIGHT * theta);
+}
+
 // ─── Concept mastery item selection ──────────────────────────────────────────
 
 /**
@@ -239,8 +268,8 @@ export function anchorItemDifficulty(rated: number | undefined, target: number):
  *   2. Untested concepts — highest importance first, direct edge.
  *   3. All important concepts resolved — pure θ (Fisher mode).
  *
- * `offset` (from difficultyOffset(config.difficulty)) is added to every target, so the
- * difficulty setting shifts the Bloom level / question type while θ keeps adapting.
+ * Targets follow itemTarget() (see THETA_WEIGHT): `offset` (from
+ * difficultyOffset(config.difficulty)) sets the centre of the band, θ moves the target within it.
  */
 export function selectNextQuestion(
   state: IRTState,
@@ -256,7 +285,7 @@ export function selectNextQuestion(
   if (failed.length > 0) {
     const concept = failed[0];
     const edge: 'incoming' | 'outgoing' = concept.askCount === 1 ? 'incoming' : 'outgoing';
-    const b = clampB(theta + (concept.importance - 0.5) * 1.5 + offset);
+    const b = itemTarget(theta, concept.importance, offset);
     return { targetConceptId: concept.conceptId, edgeDirection: edge, b_target: b, bloomTarget: difficultyToBloom(b) };
   }
 
@@ -266,12 +295,12 @@ export function selectNextQuestion(
 
   if (untested.length > 0) {
     const concept = untested[0];
-    const b = clampB(theta + (concept.importance - 0.5) * 1.5 + offset);
+    const b = itemTarget(theta, concept.importance, offset);
     return { targetConceptId: concept.conceptId, edgeDirection: 'direct', b_target: b, bloomTarget: difficultyToBloom(b) };
   }
 
-  // All resolved — pure Fisher (still shifted by the difficulty setting)
-  const b = clampB(theta + offset);
+  // All resolved — Fisher mode: no concept, so no importance nudge
+  const b = itemTarget(theta, null, offset);
   return { targetConceptId: null, edgeDirection: 'direct', b_target: b, bloomTarget: difficultyToBloom(b) };
 }
 

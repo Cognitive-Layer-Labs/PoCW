@@ -604,7 +604,7 @@ describe("VerifySession — fixed length, allowed types, difficulty", () => {
 
     it("falls back to another allowed type (never open) when the preferred generator fails", async () => {
       const calls = stubRoles({ failTypes: ["mcq"] });
-      // hard → first target 0.75 + 0.15 → MCQ preferred among [mcq, true_false]
+      // hard → first target 0.25 + 0.135 → MCQ preferred among [mcq, true_false]
       const session = new VerifySession(1, "kid1", chunks, "user1", resolveConfig({ max_questions: 2, difficulty: 0.65, q_types: ["mcq", "true_false"] }));
       await session.init();
       expect(session.currentQuestion.type).to.equal("true_false");
@@ -638,21 +638,25 @@ describe("VerifySession — fixed length, allowed types, difficulty", () => {
       return { session, user: calls[0].user, kind: calls[0].kind };
     };
 
-    it("shifts the Bloom target and type of the first question: easy → Understand/TF, medium → Apply/MCQ, hard → Analyze/open", async () => {
+    it("shifts the Bloom target and type of the first question: easy → Understand/TF, medium → Understand/MCQ, hard → Apply/MCQ, max → Evaluate/open", async () => {
       const all: QuestionType[] = ["open", "mcq", "true_false"];
       const easy = await firstQuestion({ difficulty: 0.2, q_types: all });
       expect(easy.user).to.contain("TARGET_BLOOM_LEVEL: Understand");
-      expect(easy.user).to.contain("TARGET_DIFFICULTY: -0.60");
+      expect(easy.user).to.contain("TARGET_DIFFICULTY: -0.76");
       expect(easy.kind).to.equal("true_false");
       expect(easy.session.currentQuestion.type).to.equal("true_false");
 
       const medium = await firstQuestion({ difficulty: 0.4, q_types: all });
-      expect(medium.user).to.contain("TARGET_BLOOM_LEVEL: Apply");
+      expect(medium.user).to.contain("TARGET_BLOOM_LEVEL: Understand");
       expect(medium.kind).to.equal("mcq");
 
       const hard = await firstQuestion({ difficulty: 0.65, q_types: all });
-      expect(hard.user).to.contain("TARGET_BLOOM_LEVEL: Analyze");
-      expect(hard.kind).to.equal("open");
+      expect(hard.user).to.contain("TARGET_BLOOM_LEVEL: Apply");
+      expect(hard.kind).to.equal("mcq");
+
+      const max = await firstQuestion({ difficulty: 1, q_types: all });
+      expect(max.user).to.contain("TARGET_BLOOM_LEVEL: Evaluate");
+      expect(max.kind).to.equal("open");
     });
 
     it("an easy session stays on Remember/Understand for a learner who misses questions", async () => {
@@ -666,11 +670,11 @@ describe("VerifySession — fixed length, allowed types, difficulty", () => {
     });
 
     it("anchors the LLM's difficulty rating to the target before it reaches the IRT update", async () => {
-      // LLM rates every question 1.0 (as seen live); easy target is −0.6 → b = −0.6 + 0.25
+      // LLM rates every question 1.0 (as seen live); easy target is −0.755 → b = −0.755 + 0.25
       const { session } = await firstQuestion({ difficulty: 0.2, q_types: ["mcq", "true_false"] });
-      expect(session.currentQuestion.difficulty).to.be.closeTo(-0.35, 1e-9);
+      expect(session.currentQuestion.difficulty).to.be.closeTo(-0.505, 1e-9);
       const fb = await session.submitAnswer(answerFor(session.currentQuestion));
-      expect(fb.irtParams!.b).to.be.closeTo(-0.35, 1e-9);
+      expect(fb.irtParams!.b).to.be.closeTo(-0.505, 1e-9);
     });
   });
 });

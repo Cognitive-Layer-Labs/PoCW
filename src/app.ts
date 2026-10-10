@@ -8,7 +8,7 @@ import { PoCWError, PoCWErrorCode, ContentRow } from "./sdk/types";
 import { initSessionStore, saveSession, loadSession } from "./services/session-store";
 import { getFullGraph, isFalkorAvailable } from "./services/kg-store";
 import { getContent, updateMetadata } from "./sdk/content-store";
-import { rederiveTitle } from "./services/parser";
+import { rederiveTitle, parseUpload, UploadParseError } from "./services/parser";
 
 const app = express();
 app.disable("x-powered-by");
@@ -192,7 +192,8 @@ export async function initAppServices(): Promise<void> {
 
 const MAX_ANSWER_LENGTH = 50_000;
 const MAX_SUBJECT_LENGTH = 200;
-const UPLOAD_LIMIT = "10mb";
+/** Whole books: PDF / EPUB / TXT / MD up to 40 MB. */
+const UPLOAD_LIMIT = "40mb";
 
 function validateIndexSourceUrl(source: string): string | null {
   const value = source.trim();
@@ -261,18 +262,23 @@ function publicRow(row: ContentRow): ContentRow {
 
 /**
  * POST /api/upload
- * Raw body upload (<= 10 MB). Text is extracted server-side and indexed.
- *   application/pdf           → pdf-parse
- *   text/*                    → UTF-8
- *   application/octet-stream  → PDF if it starts with %PDF-, else UTF-8 text
+ * Raw body upload (<= 40 MB). Text is extracted server-side and indexed.
+ *   application/epub+zip      → EPUB (title/author from the package metadata)
+ *   application/pdf           → pdf-parse (title/author from the document info when meaningful)
+ *   text/*                    → UTF-8 (text/markdown kept verbatim, other text re-flowed)
+ *   application/octet-stream  → EPUB / PDF when the bytes say so, else UTF-8 text
+ * Project Gutenberg license text is stripped; text beyond 4 M characters is cut.
  */
 app.post(
   "/api/upload",
-  express.raw({ type: ["application/pdf", "text/*", "application/octet-stream"], limit: UPLOAD_LIMIT }),
+  express.raw({
+    type: ["application/pdf", "application/epub+zip", "text/*", "application/octet-stream"],
+    limit: UPLOAD_LIMIT,
+  }),
   async (req: Request, res: Response) => {
     if (!Buffer.isBuffer(req.body)) {
       return res.status(415).json({
-        error: "Unsupported Content-Type — use application/pdf, text/* or application/octet-stream",
+        error: "Unsupported Content-Type — use application/pdf, application/epub+zip, text/* or application/octet-stream",
         code: "INVALID_CONFIG",
       });
     }
@@ -280,31 +286,20 @@ app.post(
       return res.status(400).json({ error: "No file body received", code: "INVALID_CONFIG" });
     }
     try {
-      const body: Buffer = req.body;
-      const ct = (req.headers["content-type"] ?? "").toLowerCase();
-      const isPdf = ct.includes("pdf") || body.subarray(0, 5).toString("latin1") === "%PDF-";
-      let text: string;
-      if (isPdf) {
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
-        const pdfParse = require("pdf-parse") as (b: Buffer) => Promise<{ text: string }>;
-        try {
-          text = (await pdfParse(body)).text;
-        } catch {
-          return res.status(422).json({ error: "Could not parse PDF", code: "INVALID_CONFIG" });
+      let doc;
+      try {
+        doc = await parseUpload(req.body as Buffer, String(req.headers["content-type"] ?? ""));
+      } catch (err) {
+        if (err instanceof UploadParseError) {
+          return res.status(err.status).json({ error: err.message, code: "INVALID_CONFIG" });
         }
-        if (!text.trim()) {
-          return res.status(422).json({ error: "No text found in PDF — it may be image-only", code: "INVALID_CONFIG" });
-        }
-      } else {
-        if (body.subarray(0, 8192).includes(0)) {
-          return res.status(415).json({ error: "Binary file not supported — upload a PDF or a text file", code: "INVALID_CONFIG" });
-        }
-        text = body.toString("utf-8");
-        if (!text.trim()) {
-          return res.status(400).json({ error: "Uploaded file is empty", code: "INVALID_CONFIG" });
-        }
+        throw err;
       }
-      const result = await getPoCW().index(text, { asText: true });
+      req.body = undefined; // let the raw upload be collected while indexing runs
+      const result = await getPoCW().index(doc.text, {
+        asText: true,
+        meta: { title: doc.title, author: doc.author },
+      });
       return sendIndexResult(res, { ...result });
     } catch (err) {
       return sendError(res, err);
@@ -365,6 +360,7 @@ app.get("/api/index/:knowledgeId", (req: Request, res: Response) => {
     return sendIndexResult(res, {
       ...result,
       title: row?.title ?? undefined,
+      author: row?.author ?? undefined,
       // Only URL sources are echoed back (uploaded text can be several MB).
       source: row && row.content_type === "url" ? row.source : undefined,
     });

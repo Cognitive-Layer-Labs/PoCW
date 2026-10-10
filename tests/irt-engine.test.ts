@@ -270,37 +270,37 @@ describe("difficulty setting (config.difficulty → target offset)", () => {
   }]));
 
   it("maps the UI presets to concrete offsets", () => {
-    expect(difficultyOffset(0.2)).to.be.closeTo(-1.2, 1e-9);   // easy
-    expect(difficultyOffset(0.4)).to.be.closeTo(-0.6, 1e-9);   // medium
-    expect(difficultyOffset(0.65)).to.be.closeTo(0.15, 1e-9);  // hard
-    expect(difficultyOffset(0.5)).to.be.closeTo(-0.3, 1e-9);   // SDK default
+    expect(difficultyOffset(0.2)).to.be.closeTo(-0.875, 1e-9);  // easy
+    expect(difficultyOffset(0.4)).to.be.closeTo(-0.375, 1e-9);  // medium
+    expect(difficultyOffset(0.65)).to.be.closeTo(0.25, 1e-9);   // hard
+    expect(difficultyOffset(0.5)).to.be.closeTo(-0.125, 1e-9);  // SDK default
     expect(difficultyOffset(undefined)).to.equal(0);
     expect(difficultyOffset(NaN)).to.equal(0);
-    expect(difficultyOffset(-5)).to.be.closeTo(-1.8, 1e-9);    // input clamped to [0,1]
-    expect(difficultyOffset(5)).to.be.closeTo(1.2, 1e-9);
+    expect(difficultyOffset(-5)).to.be.closeTo(-1.375, 1e-9);   // input clamped to [0,1]
+    expect(difficultyOffset(5)).to.be.closeTo(1.125, 1e-9);
   });
 
-  it("shifts the first target's Bloom level: easy → Understand, medium → Apply, hard → Analyze", () => {
+  it("shifts the first target: easy/medium → Understand (easy lower), hard → Apply", () => {
     const at = (d: number) => selectNextQuestion(createIRTState(), concepts(0.9, 0.7), difficultyOffset(d));
-    // base at θ=0 for importance 0.9: (0.9 − 0.5) × 1.5 = 0.6
-    expect(at(0.2).b_target).to.be.closeTo(-0.6, 1e-9);
+    // θ = 0, importance 0.9 → nudge 0.3 × 0.4 = 0.12
+    expect(at(0.2).b_target).to.be.closeTo(-0.755, 1e-9);
     expect(at(0.2).bloomTarget).to.equal("Understand");
-    expect(at(0.4).b_target).to.be.closeTo(0.0, 1e-9);
-    expect(at(0.4).bloomTarget).to.equal("Apply");
-    expect(at(0.65).b_target).to.be.closeTo(0.75, 1e-9);
-    expect(at(0.65).bloomTarget).to.equal("Analyze");
-    // No offset → unchanged legacy target
-    expect(selectNextQuestion(createIRTState(), concepts(0.9)).b_target).to.be.closeTo(0.6, 1e-9);
+    expect(at(0.4).b_target).to.be.closeTo(-0.255, 1e-9);
+    expect(at(0.4).bloomTarget).to.equal("Understand");
+    expect(at(0.65).b_target).to.be.closeTo(0.37, 1e-9);
+    expect(at(0.65).bloomTarget).to.equal("Apply");
+    expect(selectNextQuestion(createIRTState(), concepts(0.9)).b_target).to.be.closeTo(0.12, 1e-9);
   });
 
-  it("still adapts to θ, also in Fisher mode, and clamps to [−2, 2]", () => {
+  it("still adapts to θ (damped by half), also in Fisher mode, and clamps to [−2, 2]", () => {
     const high = { ...createIRTState(), theta: 1.0 };
     const low = { ...createIRTState(), theta: -1.0 };
     const off = difficultyOffset(0.2);
-    expect(selectNextQuestion(high, concepts(0.9), off).b_target)
-      .to.be.greaterThan(selectNextQuestion(low, concepts(0.9), off).b_target);
-    // Fisher mode (no tracked concepts): θ + offset
-    expect(selectNextQuestion(high, new Map(), off).b_target).to.be.closeTo(-0.2, 1e-9);
+    const hi = selectNextQuestion(high, concepts(0.9), off).b_target;
+    const lo = selectNextQuestion(low, concepts(0.9), off).b_target;
+    expect(hi - lo).to.be.closeTo(1.0, 1e-9); // Δθ = 2 → Δtarget = 1
+    // Fisher mode (no tracked concepts): offset + θ/2
+    expect(selectNextQuestion(high, new Map(), off).b_target).to.be.closeTo(-0.375, 1e-9);
     expect(selectNextQuestion({ ...createIRTState(), theta: 2 }, concepts(1.0), difficultyOffset(1)).b_target).to.equal(2);
     expect(selectNextQuestion({ ...createIRTState(), theta: -2 }, new Map(), difficultyOffset(0)).b_target).to.equal(-2);
   });
@@ -315,5 +315,63 @@ describe("difficulty setting (config.difficulty → target offset)", () => {
     expect(anchorItemDifficulty(5, 1.9)).to.equal(2);                    // [−2, 2]
     const once = anchorItemDifficulty(1.0, -0.6);
     expect(anchorItemDifficulty(once, -0.6)).to.equal(once);             // idempotent
+  });
+
+  describe("simulated sessions (6 important concepts, 4PL update, anchored LLM rating)", () => {
+    const BLOOMS = ["Remember", "Understand", "Apply", "Analyze", "Evaluate", "Create"];
+    const rank = (b: string) => BLOOMS.indexOf(b);
+    /** Bloom target of each question for a learner answering per `correct`, LLM rating per `rate`. */
+    function simulate(difficulty: number, n: number, correct: (i: number) => boolean, rate: (t: number) => number): string[] {
+      const cm = concepts(0.95, 0.9, 0.85, 0.8, 0.75, 0.7);
+      let st = createIRTState();
+      const blooms: string[] = [];
+      for (let i = 0; i < n; i++) {
+        const t = selectNextQuestion(st, cm, difficultyOffset(difficulty));
+        blooms.push(t.bloomTarget);
+        const ok = correct(i);
+        if (t.targetConceptId) {
+          const c = cm.get(t.targetConceptId)!;
+          const asked = c.askCount + 1;
+          cm.set(c.conceptId, { ...c, askCount: asked, status: ok ? "mastered" : asked >= 3 ? "failed_final" : "failed" });
+        }
+        const b = anchorItemDifficulty(rate(t.b_target), t.b_target);
+        st = updateAbility4PL(st, b, 2, t.b_target < -0.5 ? 0.5 : t.b_target < 0.5 ? 0.25 : 0, 1, ok, ok ? 100 : 0, t.bloomTarget);
+      }
+      return blooms;
+    }
+    const raters = { "LLM rates 1.0": () => 1.0, "LLM rates at target": (t: number) => t };
+    const allCorrect = () => true;
+
+    for (const [name, rate] of Object.entries(raters)) {
+      it(`easy stays on Remember/Understand for a strong learner (${name})`, () => {
+        const blooms = simulate(0.2, 10, allCorrect, rate);
+        for (const b of blooms) expect(rank(b), blooms.join(",")).to.be.at.most(rank("Apply"));
+        for (const b of blooms.slice(0, 5)) expect(["Remember", "Understand"]).to.include(b);
+      });
+
+      it(`medium tops out around Analyze within 5 questions (${name})`, () => {
+        const blooms = simulate(0.4, 5, allCorrect, rate);
+        expect(blooms[0]).to.equal("Understand");
+        for (const b of blooms) expect(rank(b), blooms.join(",")).to.be.at.most(rank("Analyze"));
+      });
+
+      it(`hard reaches Evaluate only after several correct answers, never Create (${name})`, () => {
+        const blooms = simulate(0.65, 10, allCorrect, rate);
+        expect(rank(blooms[0])).to.be.at.most(rank("Analyze"));
+        expect(rank(blooms[1])).to.be.at.most(rank("Analyze"));
+        expect(blooms).to.include("Evaluate");
+        expect(blooms).to.not.include("Create");
+      });
+
+      it(`a struggling learner never gets harder items and ends on Remember/Understand (${name})`, () => {
+        for (const d of [0.2, 0.4, 0.65]) {
+          const blooms = simulate(d, 10, () => false, rate);
+          for (let i = 1; i < blooms.length; i++) {
+            expect(rank(blooms[i]), `${d}: ${blooms.join(",")}`).to.be.at.most(rank(blooms[i - 1]));
+          }
+          expect(rank(blooms[9]), `${d}: ${blooms.join(",")}`).to.be.at.most(rank("Understand"));
+        }
+      });
+    }
   });
 });

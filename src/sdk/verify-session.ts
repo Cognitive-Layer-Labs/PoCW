@@ -32,7 +32,7 @@ import {
   GradeResult,
   QuestionGenerationError,
 } from "../services/question-generator";
-import { selectChunkIndex } from "../services/session-manager";
+import { selectChunkIndex, chunksMentioning } from "../services/session-manager";
 import { getContent } from "./content-store";
 import {
   ResolvedConfig,
@@ -209,7 +209,10 @@ export class VerifySession {
     this._currentTarget = { conceptId: target.targetConceptId, edgeDirection: target.edgeDirection };
 
     const previousQuestions = this.questionHistory.map(q => q.question);
-    const chunkIdx = selectChunkIndex(this.chunkUsageCount);
+    // Source passage: a least-used chunk that mentions the targeted concept (long books have
+    // hundreds of chunks, most of which say nothing about a given concept); any chunk otherwise.
+    const label = target.targetConceptId ? this.conceptMastery.get(target.targetConceptId)?.label : undefined;
+    const chunkIdx = selectChunkIndex(this.chunkUsageCount, chunksMentioning(this.chunks, label));
     this.chunkUsageCount[chunkIdx]++;
     this._currentChunkIndex = chunkIdx;
 
@@ -571,5 +574,13 @@ export class VerifySession {
   /** Rehydrate chunks after loading from snapshot — called by app.ts after loadSession. */
   rehydrateChunks(chunks: string[]): void {
     (this as any).chunks = chunks;
+    // The text pipeline can change between engine versions (e.g. a re-parse after an upgrade);
+    // keep the usage counters aligned with the chunks actually available.
+    const usage = this.chunkUsageCount;
+    if (usage.length !== chunks.length) {
+      usage.length = chunks.length;
+      for (let i = 0; i < usage.length; i++) usage[i] = usage[i] ?? 0;
+      if (this._currentChunkIndex >= chunks.length) this._currentChunkIndex = 0;
+    }
   }
 }

@@ -7,24 +7,40 @@ How the engine works under the hood: indexing, IRT model, parameter sources, con
 ## 1. Indexing Pipeline
 
 ```
-source (http(s) URL / uploaded PDF / uploaded text)
+source (http(s) URL / uploaded PDF, EPUB, TXT, MD ≤ 40 MB)
   │
-  ▼  Parser (jsdom main-content extraction, pdf-parse, YouTube transcript)
+  ▼  Parser (jsdom main-content extraction, pdf-parse, EPUB, YouTube transcript)
   │    ↳ URL fetches go through safeFetch: SSRF-guarded (private/internal targets,
-  │      incl. Docker service names and redirects to them, are refused), 50 MB / 30 s caps
+  │      incl. Docker service names and redirects to them, are refused), 50 MB / 120 s caps
+  │    ↳ EPUB: container.xml → OPF → spine order → XHTML → text (lightweight tag stripper,
+  │      no DOM per chapter); ZIP reader capped at 10 000 entries / 60 MB inflated
+  │    ↳ HTML > 1 MB (book-sized pages) uses the same tag stripper instead of jsdom
+  │    ↳ Project Gutenberg header/footer stripped; title/author from EPUB OPF, PDF info or the
+  │      Gutenberg header; text cut to 4 000 000 characters
   │
   ▼  Chunker (4000 characters, 500-character overlap)
   │
-  ▼  LLM (KG extraction prompt) — for up to 15 evenly sampled chunks
+  ▼  LLM (KG extraction prompt) — sampled chunks, 4 calls in parallel
+  │    ↳ ≤ 15 chunks: all; else 2·√chunks (max 40), one from the middle of each equal slice
   │    ↳ nodes: { id, label, bloomLevel, importance (1–10) }
   │    ↳ edges: { source, target, relationship }
   │
-  ▼  Importance normalization
+  ▼  Merge across chunks
+  │    same canonical label (case, accents, articles, possessives, plural "s",
+  │    parentheticals ignored) → one node; score = Σ importance over chunks;
+  │    top 50 nodes kept, ≤ 150 most frequent edges between them
+  │
+  ▼  Importance normalization (over the merged graph)
   │    score = 0.6 × importance_rank + 0.4 × degree_rank
   │    result: 0.00–1.00, guaranteed to span the full range
   │
   ▼  FalkorDB (graph store, keyed by numeric contentId)
 ```
+
+A novel (≈ 300–1 000 chunks) costs 40 extraction calls; at 4 in parallel indexing takes about
+1–2 minutes. Questions later draw their source passage from the whole book: the least-used chunk
+that mentions the targeted concept (full label, else all its significant words, else its words
+one by one), or any least-used chunk when none does.
 
 **Why rank-based normalization?**
 LLMs tend to cluster importance scores at 8–10 for most nodes. Rank-based scoring re-spreads them across 0–1, so the threshold `importance ≥ 0.65` always identifies a meaningful top tier regardless of how the LLM rated the content.
@@ -53,19 +69,27 @@ untested → asked → mastered   (correct answer)
 **Target difficulty of the next item:**
 
 ```
-b_target = clamp(θ + (importance − 0.5) × 1.5 + offset, −2, 2)     (Fisher mode: θ + offset)
-offset   = 3 × (difficulty − 0.6)                                  (config.difficulty ∈ [0, 1])
+b_target = clamp(offset + 0.3 × (importance − 0.5) + 0.5 × θ, −2, 2)   (Fisher mode: no importance term)
+offset   = 2.5 × (difficulty − 0.55)                                    (config.difficulty ∈ [0, 1])
 ```
 
-| `difficulty` | offset | first targets at θ = 0 (importance 0.65–1.0) | typical Bloom / type |
-|---|---|---|---|
-| 0.20 (easy) | −1.20 | −0.98 … −0.45 | Remember/Understand, true/false + MCQ |
-| 0.40 (medium) | −0.60 | −0.38 … +0.15 | Understand/Apply, MCQ |
-| 0.50 (default) | −0.30 | −0.08 … +0.45 | Understand/Apply |
-| 0.65 (hard) | +0.15 | +0.38 … +0.90 | Apply/Analyze, rising to Evaluate |
+| `difficulty` | offset | first target at θ = 0 | strong learner (all correct) | struggling learner |
+|---|---|---|---|---|
+| 0.20 (easy) | −0.875 | −0.83 … −0.73: Understand, true/false | stays Understand (true/false, then MCQ) | Remember |
+| 0.40 (medium) | −0.375 | −0.33 … −0.23: Understand, MCQ | Understand → Apply; never past Analyze within 5 questions | Understand → Remember |
+| 0.50 (default) | −0.125 | −0.08 … +0.03: Understand/Apply, MCQ | Apply → Analyze | Understand → Remember |
+| 0.65 (hard) | +0.25 | +0.30 … +0.40: Apply, MCQ | Apply → Analyze → Evaluate from question 3–4; no Create | Apply → Understand |
 
-The offset is constant for the session; θ still moves the target after every answer, so a strong
-learner gets harder items and a struggling one easier items within the chosen band.
+(Simulated with the 4PL update and an LLM rating anchored to ±0.25 — both an LLM that rates every
+item 1.0 and one that rates at the target; see `tests/irt-engine.test.ts`.)
+
+Why θ enters at half weight: for an all-correct learner θ ≈ hardest item + up to 1.0, so with
+`b_target = θ + …` every correct answer raised the next target by 0.35–1.0 on top of the last one
+(medium reached Evaluate/Create by question 4–5, hard reached Create by question 2). With 0.5 × θ
+the target converges: the difficulty setting fixes the centre of the band and θ moves the target
+at most ±1 around it, up for strong learners and down for struggling ones. The importance term
+(formerly × 1.5, always positive for important concepts) is now a small nudge. The maximum target
+at θ = 2 is `offset + 1.15`, so Create (≥ 1.5) is only reachable at difficulty ≳ 0.7.
 
 **Edge direction rotation on re-ask:**
 Each concept has a graph with incoming and outgoing edges. Re-asks use a different slice of that graph to generate a different question:
@@ -140,8 +164,11 @@ For each response i (u_i ∈ {0, 1}):
 SE = 1 / sqrt(1 + Σ FisherInfo_i(θ))
 ```
 
-All-correct / all-wrong patterns (where MAP is ill-conditioned) use a bounded heuristic:
-θ = max(b) + min(0.5·ln(n+1), 1) (resp. min(b) − …), clamped to [−2, 2].
+All-correct / all-wrong patterns use a bounded heuristic θ = max(b) + min(0.5·ln(n+1), 1)
+(resp. min(b) − …), clamped to [−2, 2] — but never less extreme than the MAP estimate in the
+direction of the evidence (all-correct: max(heuristic, MAP); all-wrong: min(heuristic, MAP)).
+Without that bound one wrong answer on a moderately hard item (b = 0.6 → θ = 0.25) raised θ above
+the prior, and a correct answer on an easy item lowered it.
 
 ---
 

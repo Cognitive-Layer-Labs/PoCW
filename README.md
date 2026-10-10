@@ -1,7 +1,7 @@
 # PoCW Engine — Proof of Cognitive Work
 
 PoCW measures whether someone actually understood a piece of content. It ingests a source
-(web page, PDF, plain text or YouTube video), extracts a **knowledge graph** with an LLM, and then
+(web page, whole book as PDF / EPUB / TXT / Markdown, or YouTube video), extracts a **knowledge graph** with an LLM, and then
 runs an **adaptive test**: questions are generated from the graph, free-text answers are graded by an
 LLM against reference claims, and a **4PL Item Response Theory** model estimates the learner's ability.
 
@@ -14,19 +14,20 @@ The engine is a plain HTTP service (Node.js + TypeScript) backed by FalkorDB, Re
 ```
                     ┌──────────────────────── engine (Express, :3000) ───────────────────────┐
   POST /api/index   │  parser ─▶ chunker ─▶ kg-builder (LLM) ─▶ kg-store ──────────────┐     │
-  POST /api/upload  │  (SSRF-safe fetch, PDF, HTML, YouTube)                   FalkorDB │     │
+  POST /api/upload  │  (SSRF-safe fetch, PDF, EPUB, HTML, YouTube)             FalkorDB │     │
                     │                                                                   ▼     │
   POST /api/verify  │  verify session ─▶ question generation (LLM, KG-grounded)               │
   .../answer        │        │            ─▶ grading (claims for open, exact for MCQ/TF)      │
   .../result        │        └─▶ irt-engine (4PL MAP θ, SE, concept-mastery loop)             │
-                    │  content-store (SQLite: index status, titles)   session-store (Redis)   │
+                    │  content-store (SQLite: status, title, author)  session-store (Redis)   │
                     └──────────────────────────────────────────────────────────────────────────┘
 ```
 
 | Component | Role |
 |---|---|
-| `src/services/parser.ts`, `safe-fetch.ts` | URL / PDF / HTML / YouTube text extraction; every fetch is SSRF-guarded |
-| `src/services/kg-builder.ts`, `kg-store.ts` | LLM knowledge-graph extraction; storage and queries in FalkorDB |
+| `src/services/parser.ts`, `safe-fetch.ts` | URL / upload / PDF / HTML / YouTube text extraction; every fetch is SSRF-guarded |
+| `src/services/epub.ts`, `zip-reader.ts`, `book-text.ts` | EPUB parsing (hardened ZIP reader), Project Gutenberg stripping, title/author detection, text limits |
+| `src/services/kg-builder.ts`, `kg-store.ts` | LLM knowledge-graph extraction (sampled across the whole text, merged across chunks); storage and queries in FalkorDB |
 | `src/services/question-*.ts` | Question generation + quality check, answer grading |
 | `src/services/irt-engine.ts` | 4PL IRT, MAP ability estimation, concept-mastery item selection |
 | `src/sdk/` | `PoCW` SDK class (`index`, `verify`, admin ops), `VerifySession`, SQLite content store |
@@ -124,10 +125,10 @@ requests/min per client IP; index-status polling has its own 120/min budget.
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/api/upload` | Raw body (`application/pdf`, `text/*`, `application/octet-stream`, ≤ 10 MB) → index |
+| `POST` | `/api/upload` | Raw body (`application/pdf`, `application/epub+zip`, `text/*`, `application/octet-stream`, ≤ 40 MB) → index |
 | `POST` | `/api/index` | `{ source: "https://..." }` → index a URL |
 | `GET` | `/api/index` | List indexed content |
-| `GET` | `/api/index/:knowledgeId` | Indexing status (`202` + `Retry-After` while pending/indexing) |
+| `GET` | `/api/index/:knowledgeId` | Indexing status (`202` + `Retry-After` while pending/indexing), `title`, optional `author` |
 | `PATCH` | `/api/index/:knowledgeId/title` | Re-derive or set a title |
 | `POST` | `/api/verify` | `{ knowledgeId, subject?, config? }` → start a session, first question |
 | `POST` | `/api/verify/:sessionId/answer` | `{ answer }` → feedback (+ `nextQuestion`) |
@@ -137,6 +138,18 @@ requests/min per client IP; index-status polling has its own 120/min budget.
 | `GET` | `/health` | Liveness (no auth) |
 
 Details, shapes and error codes: [docs/API.md](docs/API.md).
+
+### Sources, books and limits
+
+| | |
+|---|---|
+| Formats | Web pages (HTML), PDF, EPUB 2/3, plain text, Markdown, YouTube captions — by URL (`/api/index`) or upload (`/api/upload`, not YouTube/HTML) |
+| Upload size | ≤ 40 MB (`413` above); URL downloads ≤ 50 MB / 120 s, always through the SSRF guard |
+| Text size | 4 000 000 characters per document (whole novels: Moby-Dick ≈ 1.2 M, War and Peace ≈ 3.2 M) |
+| Project Gutenberg | License header/footer stripped; `Title:` / `Author:` used as metadata |
+| Title / author | EPUB `dc:title` / `dc:creator`, PDF info `Title` / `Author` (placeholders ignored), Gutenberg header; else the usual title derivation. `author` is returned by `GET /api/index/:id` and in listings |
+| Knowledge graph | Chunks sampled across the whole text (≤ 40 LLM calls, 4 in parallel), concepts merged across chunks, ≤ 50 nodes / 150 edges |
+| EPUB safety | ZIP reader capped at 10 000 entries and 60 MB decompressed (enforced while inflating) |
 
 ---
 

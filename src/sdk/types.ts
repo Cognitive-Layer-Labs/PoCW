@@ -20,10 +20,11 @@ export interface PoCWConfig {
    *   hard   → difficulty 0.65, threshold 0.65, 20 questions
    */
   difficulty_preset?: "easy" | "medium" | "hard";
-  /** Difficulty 0-1. Default: 0.5. Shifts every item's target difficulty (and so its Bloom level
-   *  and, in mixed sessions, its type) by 3 × (difficulty − 0.6) on the IRT scale: 0.2 → −1.2
-   *  (Remember/Understand), 0.4 → −0.6 (Understand/Apply), 0.65 → +0.15 (Apply/Analyze/Evaluate).
-   *  θ still adapts the target up or down after every answer. */
+  /** Difficulty 0-1. Default: 0.5. Sets the centre of the item-difficulty band (and so the Bloom
+   *  level and, in mixed sessions, the question type): offset 2.5 × (difficulty − 0.55) on the IRT
+   *  scale — 0.2 → −0.875 (Remember/Understand), 0.4 → −0.375 (Understand/Apply), 0.65 → +0.25
+   *  (Apply/Analyze, Evaluate after several correct answers). θ moves the target up or down within
+   *  ±1 of that centre (see itemTarget in irt-engine.ts). */
   difficulty?: number;
   /** Question types to use. Default: all three. Only these types are ever asked (incl. fallbacks). */
   q_types?: QuestionType[];
@@ -108,6 +109,8 @@ export interface IndexResult {
   status: IndexStatus;
   contentId?: number;
   error?: string;
+  /** Book author when one was detected (EPUB, PDF info, Project Gutenberg header). */
+  author?: string;
 }
 
 // ─── Content Store Row ───────────────────────────────────────────────────────
@@ -129,6 +132,8 @@ export interface ContentRow {
   last_used_at: string | null;
   /** 1 = hidden from the public catalog (admin toggle); 0/NULL = visible. */
   hidden: number | null;
+  /** Author detected from the file (EPUB dc:creator, PDF info Author, Gutenberg header); NULL if none. */
+  author: string | null;
 }
 
 // ─── Verification Question ───────────────────────────────────────────────────

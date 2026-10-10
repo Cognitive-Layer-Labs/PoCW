@@ -281,6 +281,37 @@ function toResponse(raw: RawResponse): Response {
  * Throws SsrfBlockedError when any hop targets a non-public address.
  */
 export async function safeFetch(rawUrl: string, options: SafeFetchOptions = {}): Promise<Response> {
+  return toResponse((await fetchRaw(rawUrl, options)).raw);
+}
+
+/** Result of safeFetchBuffer: the body as one Buffer (no WHATWG Response copies). */
+export interface BufferResponse {
+  ok: boolean;
+  status: number;
+  /** Lower-cased Content-Type header ("" when absent). */
+  contentType: string;
+  /** URL of the final hop (after redirects). */
+  url: string;
+  body: Buffer;
+}
+
+/**
+ * Same protections as safeFetch, but returns the body as a single Buffer. Use for large
+ * downloads (books up to tens of MB) so the body is not copied again into a Response.
+ */
+export async function safeFetchBuffer(rawUrl: string, options: SafeFetchOptions = {}): Promise<BufferResponse> {
+  const { raw, url } = await fetchRaw(rawUrl, options);
+  const ct = raw.headers["content-type"];
+  return {
+    ok: raw.status >= 200 && raw.status < 300,
+    status: raw.status,
+    contentType: String(Array.isArray(ct) ? ct[0] : ct ?? "").toLowerCase(),
+    url,
+    body: raw.body,
+  };
+}
+
+async function fetchRaw(rawUrl: string, options: SafeFetchOptions): Promise<{ raw: RawResponse; url: string }> {
   const opts: ResolvedOptions = {
     ...options,
     timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
@@ -297,7 +328,7 @@ export async function safeFetch(rawUrl: string, options: SafeFetchOptions = {}):
       current = new URL(location, url).toString();
       continue;
     }
-    return toResponse(raw);
+    return { raw, url: url.toString() };
   }
   throw new Error(`Too many redirects (>${maxRedirects}) fetching ${rawUrl}`);
 }

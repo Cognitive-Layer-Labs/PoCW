@@ -18,7 +18,10 @@
   `RateLimit-*` headers). `GET /api/index/:knowledgeId` (status polling) is exempt from that budget
   and has its own limit of 120/min. `/health` is not limited. Behind a proxy, set `TRUST_PROXY` so the
   client IP is taken from `X-Forwarded-For`.
-- **Body size.** JSON bodies ≤ 1 MB; uploads ≤ 10 MB (`413` otherwise).
+- **Body size.** JSON bodies ≤ 1 MB; uploads ≤ 40 MB (`413` otherwise). URL sources are downloaded
+  up to 50 MB (120 s).
+- **Text size.** Each document is cut to **4 000 000 characters** after boilerplate removal — whole
+  novels fit (Moby-Dick ≈ 1.2 M, War and Peace ≈ 3.2 M characters).
 
 ### Index status values
 
@@ -32,13 +35,20 @@ source whose indexing `failed` retries it.
 
 ### `POST /api/upload`
 
-Index an uploaded file. Raw request body (not multipart).
+Index an uploaded file — an article or a whole book (PDF, EPUB, TXT, MD; ≤ 40 MB). Raw request
+body (not multipart).
 
 | `Content-Type` | Handling |
 |---|---|
-| `application/pdf` | text extracted with pdf-parse (`422` if the PDF has no text layer) |
-| `text/*` | decoded as UTF-8 |
-| `application/octet-stream` | PDF if the body starts with `%PDF-`, otherwise UTF-8 text (`415` if binary) |
+| `application/epub+zip` | EPUB 2/3: spine documents in reading order → text, chapters separated by a blank line; navigation/TOC, scripts and styles skipped. Title/author from the package metadata (`dc:title`, `dc:creator`). `422` if it is not a valid EPUB or has no text |
+| `application/pdf` | text extracted with pdf-parse (`422` if the PDF has no text layer). Title/author from the document info when meaningful (placeholders such as "Untitled" or "Microsoft Word - …" are ignored) |
+| `text/*` | decoded as UTF-8; `text/markdown` kept verbatim, other text re-flowed (paragraphs kept, hard line wraps joined) |
+| `application/octet-stream` | EPUB if the body is a ZIP whose `mimetype` entry is `application/epub+zip`, PDF if it starts with `%PDF-`, otherwise UTF-8 text (`415` if binary) |
+
+For every format, **Project Gutenberg** license text (everything before `*** START OF THE PROJECT
+GUTENBERG EBOOK … ***` and from `*** END OF …` on) is removed and its `Title:` / `Author:` header
+lines are used as metadata. EPUB archives are read with a hardened ZIP reader (≤ 10 000 entries,
+≤ 60 MB decompressed in total, enforced while inflating).
 
 The body is always indexed as **text** — it is never interpreted as a URL or path. The same text
 always maps to the same `knowledgeId`.
@@ -49,13 +59,24 @@ always maps to the same `knowledgeId`.
 { "knowledgeId": "3f5a…", "status": "indexing", "contentId": 182736451234 }
 ```
 
-Other responses: `400` empty body, `415` unsupported content type / binary file, `413` > 10 MB.
+Other responses: `400` empty body, `415` unsupported content type / binary file, `422` unreadable
+PDF/EPUB, `413` > 40 MB.
+
+**Indexing a book.** The knowledge graph is extracted from chunks (4 000 characters) sampled
+evenly across the whole text: all chunks for short texts (≤ 15), otherwise 2·√(chunks), at most
+**40** LLM calls, **4** in parallel — a novel indexes in roughly 1–2 minutes. Concepts from all
+chunks are merged (same or near-same labels: case, accents, articles, possessives, plurals and
+parentheticals ignored) into one graph of at most **50** nodes (the most important) and 150 edges
+between them.
 
 ---
 
 ### `POST /api/index`
 
-Index a web page, PDF/text file URL, or YouTube video (captions).
+Index a web page, a PDF / EPUB / text / Markdown file URL (e.g. a Project Gutenberg book), or a
+YouTube video (captions). EPUB is recognised by `Content-Type: application/epub+zip`, a `.epub`
+path, or an `application/octet-stream` / zip body that is an EPUB. Same parsing, limits and
+metadata detection as `/api/upload`.
 
 ```json
 { "source": "https://en.wikipedia.org/wiki/Photosynthesis" }
@@ -81,7 +102,8 @@ List indexed content (hidden entries excluded). Query: `status?`, `limit?` (defa
       "title": "Photosynthesis", "description": "Photosynthesis is…",
       "status": "ready", "error": null, "content_id": 182736451234,
       "content_hash": "…", "chunk_count": 12, "created_at": "2026-10-10 10:00:00",
-      "indexed_at": "2026-10-10 10:01:10", "usage_count": 3, "last_used_at": "…", "hidden": 0
+      "indexed_at": "2026-10-10 10:01:10", "usage_count": 3, "last_used_at": "…", "hidden": 0,
+      "author": null
     }
   ],
   "total": 1
@@ -89,6 +111,8 @@ List indexed content (hidden entries excluded). Query: `status?`, `limit?` (defa
 ```
 
 For uploaded text (`content_type: "raw_text"`), `source` is truncated to 300 characters.
+`author` is the detected book author (EPUB `dc:creator`, PDF info `Author`, Project Gutenberg
+`Author:` header) or `null`.
 
 ---
 
@@ -108,6 +132,10 @@ Indexing status. `202` + `Retry-After: 5` while `pending`/`indexing`, `200` when
 ```
 
 `error` is present when `status` is `"failed"`. `source` is only returned for URL sources.
+`author` (optional string) is present when an author was detected — e.g.
+`{ "title": "Moby-Dick; or The Whale", "author": "Herman Melville", … }`. For books the title is
+taken from the file (EPUB `dc:title`, PDF info `Title`, Gutenberg `Title:`) before falling back to
+the usual derivation (web page title via LLM, first line of text).
 
 ---
 
@@ -312,8 +340,8 @@ await pocw.close();
 | Method | Description |
 |---|---|
 | `init()` / `close()` | Open / close FalkorDB + SQLite |
-| `index(source, { asText? })` | URL or raw text → `IndexResult` (background indexing, idempotent). `asText: true` never treats the input as a URL |
-| `getIndexStatus(knowledgeId)` | `IndexResult` |
+| `index(source, { asText?, meta? })` | URL or raw text → `IndexResult` (background indexing, idempotent). `asText: true` never treats the input as a URL; `meta: { title?, author? }` supplies metadata found in an uploaded file |
+| `getIndexStatus(knowledgeId)` | `IndexResult` (`{ knowledgeId, status, contentId?, error?, author? }`) |
 | `waitForIndex(knowledgeId, timeoutMs = 300000)` | Resolves when `ready` |
 | `listContent({ status?, limit?, offset?, includeHidden? })` | `{ rows: ContentRow[], total }` |
 | `verify(knowledgeId, subject, config?)` | `VerifySession` (no `onQuestion`) or `PoCWResult` (with `onQuestion`) |
@@ -353,11 +381,12 @@ interface PoCWConfig {
   explicit `max_questions` wins over a preset's. `maxQuestions` (response of `POST /api/verify`) and
   every `question.totalQuestions` equal it. If the content has more important concepts than
   questions, the most important ones are asked first.
-- **`difficulty`** shifts each item's target difficulty by `3 × (difficulty − 0.6)` on the IRT
-  scale — easy 0.2 → −1.2 (mostly Remember/Understand, true/false + MCQ), medium 0.4 → −0.6
-  (mostly Understand/Apply), hard 0.65 → +0.15 (Apply/Analyze/Evaluate); default 0.5 → −0.3.
-  The learner's ability θ still moves the target up or down after every answer. See
-  [OPTIONS.md §2](OPTIONS.md#2-concept-mastery-loop).
+- **`difficulty`** sets the centre of the item-difficulty band: offset `2.5 × (difficulty − 0.55)`
+  on the IRT scale, target = offset + small importance nudge + ½ θ. Easy 0.2 → −0.875 (Remember/
+  Understand, true/false + MCQ), medium 0.4 → −0.375 (Understand/Apply; a strong learner stays at or
+  below Analyze in a 5-question test), hard 0.65 → +0.25 (Apply/Analyze, Evaluate only after
+  several correct answers); default 0.5 → −0.125. The learner's ability θ moves the target up or
+  down by at most ±1 around that centre. See [OPTIONS.md §2](OPTIONS.md#2-concept-mastery-loop).
 - **`q_types`**: with several types, the type follows the item's target difficulty among the
   allowed types only (true/false for easier items, then MCQ, then open). If generating the
   preferred type fails, the next allowed type is tried — never a type outside `q_types`.

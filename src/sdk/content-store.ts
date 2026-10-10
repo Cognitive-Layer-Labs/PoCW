@@ -40,6 +40,7 @@ const ADDED_COLUMNS: Array<[string, string]> = [
   ["title", "TEXT"],
   ["description", "TEXT"],
   ["hidden", "INTEGER DEFAULT 0"],
+  ["author", "TEXT"],
 ];
 
 // Columns exposed as ContentRow. Selected explicitly so legacy columns present in databases
@@ -47,8 +48,15 @@ const ADDED_COLUMNS: Array<[string, string]> = [
 const ROW_COLUMNS = [
   "knowledge_id", "content_type", "source", "title", "description", "status", "error",
   "content_id", "content_hash", "chunk_count", "created_at", "indexed_at", "usage_count",
-  "last_used_at", "hidden",
+  "last_used_at", "hidden", "author",
 ].join(", ");
+
+// Listing variant: uploads are stored as their full extracted text (whole books, up to millions
+// of characters), so list queries only load the first 301 characters of raw-text sources.
+const LIST_COLUMNS = ROW_COLUMNS.replace(
+  /\bsource\b/,
+  "CASE WHEN content_type = 'raw_text' THEN substr(source, 1, 301) ELSE source END AS source",
+);
 
 // ─── Write Queue — serializes all mutating calls to prevent SQLITE_BUSY ──
 
@@ -77,12 +85,17 @@ export function initContentStore(
   db = new Database(dbPath);
   db.pragma("journal_mode = WAL");
   db.exec(CREATE_TABLE);
+  migrate(db);
+}
 
+/** Idempotent schema migration: add the columns introduced after the first schema version. */
+function migrate(database: Database.Database): void {
   const existing = new Set(
-    (db.prepare("PRAGMA table_info(content_index)").all() as Array<{ name: string }>).map(c => c.name)
+    (database.prepare("PRAGMA table_info(content_index)").all() as Array<{ name: string }>).map(c => c.name)
   );
+  if (existing.size === 0) return; // table not created yet (injected test databases)
   for (const [name, type] of ADDED_COLUMNS) {
-    if (!existing.has(name)) db.exec(`ALTER TABLE content_index ADD COLUMN ${name} ${type}`);
+    if (!existing.has(name)) database.exec(`ALTER TABLE content_index ADD COLUMN ${name} ${type}`);
   }
 }
 
@@ -152,17 +165,25 @@ export async function markReady(
 }
 
 /**
- * Update title and description for a knowledge ID.
+ * Update title and description (and, when given, author) for a knowledge ID.
+ * `author` undefined leaves the stored author untouched; null clears it.
  */
 export async function updateMetadata(
   knowledgeId: string,
   title: string,
-  description: string
+  description: string,
+  author?: string | null
 ): Promise<void> {
   return runSerialized(() => {
-    getDb()
-      .prepare("UPDATE content_index SET title = ?, description = ? WHERE knowledge_id = ?")
-      .run(title, description, knowledgeId);
+    if (author === undefined) {
+      getDb()
+        .prepare("UPDATE content_index SET title = ?, description = ? WHERE knowledge_id = ?")
+        .run(title, description, knowledgeId);
+    } else {
+      getDb()
+        .prepare("UPDATE content_index SET title = ?, description = ?, author = ? WHERE knowledge_id = ?")
+        .run(title, description, author, knowledgeId);
+    }
   });
 }
 
@@ -231,7 +252,7 @@ export function listContent(options?: {
     .get(...params) as { count: number };
 
   const rows = db
-    .prepare(`SELECT ${ROW_COLUMNS} FROM content_index ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`)
+    .prepare(`SELECT ${LIST_COLUMNS} FROM content_index ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`)
     .all(...params, limit, offset) as ContentRow[];
 
   return { rows, total: total.count };
@@ -290,7 +311,8 @@ export function closeContentStore(): void {
   }
 }
 
-/** For testing: override the database instance */
+/** For testing: override the database instance (migrated like a real one). */
 export function __setDbForTest(testDb: Database.Database | null): void {
   db = testDb;
+  if (testDb) migrate(testDb);
 }

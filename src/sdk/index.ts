@@ -7,8 +7,9 @@
  */
 
 import { createHash } from "crypto";
-import { parseContentToText, parseWebContentWithTitle, chunkText, isYouTubeStrict, extractYouTubeId } from "../services/parser";
-import { extractKnowledgeGraph } from "../services/kg-builder";
+import { parseSource, ParsedDocument, chunkText, isYouTubeStrict, extractYouTubeId } from "../services/parser";
+import { prepareText, DocumentMeta } from "../services/book-text";
+import { buildKnowledgeGraph } from "../services/kg-builder";
 import { storeGraph, graphExists, initFalkorDB, closeFalkorDB, deleteGraph, wipeAllGraphs } from "../services/kg-store";
 import { contentUrlToId } from "../services/session-manager";
 import {
@@ -57,45 +58,68 @@ export type {
   PoCWErrorCode,
 } from "./types";
 
-const MAX_KG_CHUNKS = 15;
 
 // 3.7 — LRU cache replaces unbounded Map to prevent OOM under heavy indexing load.
-class LRUCache<K, V> {
-  private map = new Map<K, V>();
-  constructor(private readonly maxSize: number) {}
+// Bounded by entry count AND total weight: with whole books (up to 4 M characters each) an
+// entry-count bound alone could hold gigabytes.
+export class LRUCache<K, V> {
+  private map = new Map<K, { value: V; weight: number }>();
+  private totalWeight = 0;
+  constructor(
+    private readonly maxSize: number,
+    private readonly maxWeight = Infinity,
+    private readonly weigh: (v: V) => number = () => 1,
+  ) {}
 
   get(k: K): V | undefined {
-    const v = this.map.get(k);
-    if (v !== undefined) {
+    const e = this.map.get(k);
+    if (e !== undefined) {
       // Move to end (most-recently-used position)
       this.map.delete(k);
-      this.map.set(k, v);
+      this.map.set(k, e);
     }
-    return v;
+    return e?.value;
   }
 
   set(k: K, v: V): void {
-    if (this.map.has(k)) {
-      this.map.delete(k);
-    } else if (this.map.size >= this.maxSize) {
-      // Evict least-recently-used (first entry)
-      const firstKey = this.map.keys().next().value;
-      if (firstKey !== undefined) this.map.delete(firstKey);
+    this.delete(k);
+    const weight = this.weigh(v);
+    this.map.set(k, { value: v, weight });
+    this.totalWeight += weight;
+    // Evict least-recently-used entries (never the one just added).
+    while ((this.map.size > this.maxSize || this.totalWeight > this.maxWeight) && this.map.size > 1) {
+      const firstKey = this.map.keys().next().value as K;
+      this.delete(firstKey);
     }
-    this.map.set(k, v);
   }
 
   delete(k: K): void {
-    this.map.delete(k);
+    const e = this.map.get(k);
+    if (e) {
+      this.totalWeight -= e.weight;
+      this.map.delete(k);
+    }
   }
 
   clear(): void {
     this.map.clear();
+    this.totalWeight = 0;
   }
+
+  get size(): number { return this.map.size; }
+  get weight(): number { return this.totalWeight; }
 }
 
-/** Cached content text + chunks for indexed content (avoids re-parsing). LRU, max 100 entries. */
-const contentCache = new LRUCache<string, { text: string; chunks: string[] }>(100);
+/**
+ * Characters of cached document text (≈ 1–2 bytes each in V8; chunks are slices of the same
+ * string). 24 M characters ≈ 6 long novels ≈ 25–50 MB — sized for the 768 MB engine container.
+ */
+const CONTENT_CACHE_MAX_CHARS = 24_000_000;
+
+/** Cached content text + chunks for indexed content (avoids re-parsing). LRU: 100 entries / 24 M chars. */
+const contentCache = new LRUCache<string, { text: string; chunks: string[] }>(
+  100, CONTENT_CACHE_MAX_CHARS, v => v.text.length,
+);
 
 /** Active background indexing promises */
 const indexingJobs = new Map<string, Promise<void>>();
@@ -134,7 +158,7 @@ class PoCW {
    * Returns immediately — indexing happens in the background.
    * Idempotent: calling with the same source returns the existing entry.
    */
-  async index(source: string, options?: { asText?: boolean }): Promise<IndexResult> {
+  async index(source: string, options?: { asText?: boolean; meta?: DocumentMeta }): Promise<IndexResult> {
     this.ensureInit();
 
     const knowledgeId = computeKnowledgeId(source);
@@ -150,7 +174,7 @@ class PoCW {
 
         await markIndexing(knowledgeId);
 
-        const job = this.runIndexing(knowledgeId, retrySource, retryContentId, existing.content_type);
+        const job = this.runIndexing(knowledgeId, retrySource, retryContentId, existing.content_type, options?.meta);
         indexingJobs.set(knowledgeId, job);
         job.finally(() => indexingJobs.delete(knowledgeId));
 
@@ -173,7 +197,7 @@ class PoCW {
     await markIndexing(knowledgeId);
 
     // Start background indexing
-    const job = this.runIndexing(knowledgeId, source, numericId, contentType);
+    const job = this.runIndexing(knowledgeId, source, numericId, contentType, options?.meta);
     indexingJobs.set(knowledgeId, job);
     job.finally(() => indexingJobs.delete(knowledgeId));
 
@@ -192,6 +216,7 @@ class PoCW {
       status: row.status as IndexResult["status"],
       contentId: row.content_id ?? undefined,
       error: row.error ?? undefined,
+      author: row.author ?? undefined,
     };
   }
 
@@ -381,50 +406,34 @@ class PoCW {
     knowledgeId: string,
     source: string,
     contentId: number,
-    contentType: string
+    contentType: string,
+    meta?: DocumentMeta
   ): Promise<void> {
     try {
-      let text: string;
-      let htmlTitle: string | null = null;
-
-      if (contentType === "raw_text") {
-        text = source;
-      } else if (contentType === "url") {
-        // Use the title-aware parser for web URLs so extractMetadata can call
-        // the LLM with the real HTML <title> tag (fixes "YouTube video <slug>" bug).
-        const parsed = await parseWebContentWithTitle(source);
-        text = parsed.text;
-        htmlTitle = parsed.htmlTitle;
-      } else {
-        text = await parseContentToText(source);
-      }
-
+      const doc = await loadDocument(source, contentType, meta);
+      const text = doc.text;
       const chunks = chunkText(text);
       const contentHash = createHash("sha256").update(text).digest("hex");
 
-      // Build KG from sampled chunks
+      // One merged graph for the whole document: chunks sampled across the text, extracted with
+      // bounded concurrency, concepts merged across chunks and capped (see buildKnowledgeGraph).
       if (!(await graphExists(contentId))) {
-        let sampled: string[];
-        if (chunks.length <= MAX_KG_CHUNKS) {
-          sampled = chunks;
-        } else {
-          const step = chunks.length / MAX_KG_CHUNKS;
-          sampled = Array.from({ length: MAX_KG_CHUNKS }, (_, i) =>
-            chunks[Math.min(Math.floor(i * step), chunks.length - 1)]
-          );
-        }
-        for (const chunk of sampled) {
-          const graph = await extractKnowledgeGraph(contentId, chunk);
-          await storeGraph(graph);
-        }
+        const graph = await buildKnowledgeGraph(contentId, chunks);
+        await storeGraph(graph);
       }
 
       // Cache content for verify()
       contentCache.set(knowledgeId, { text, chunks });
 
-      // Extract title/description — pass htmlTitle so LLM can use it for web pages
-      const { title, description } = await extractMetadata(source, text, htmlTitle);
-      await updateMetadata(knowledgeId, title, description);
+      // Title/author/description. Re-indexing an upload (raw text, no metadata passed) keeps the
+      // title/author found at upload time — they cannot be re-derived from the stored text.
+      const existing = getContent(knowledgeId);
+      if (!(contentType === "raw_text" && !meta && existing?.title)) {
+        const { title, description } = await extractMetadata(
+          source, text, contentType === "raw_text" ? undefined : doc.htmlTitle ?? null, doc.title,
+        );
+        await updateMetadata(knowledgeId, title, description, doc.author ?? null);
+      }
 
       await markReady(knowledgeId, contentHash, chunks.length);
     } catch (err) {
@@ -445,10 +454,8 @@ class PoCW {
     if (!row) {
       throw new PoCWError("CONTENT_NOT_FOUND", `No content for knowledge ID: ${knowledgeId}`);
     }
-    // Re-parse if not cached (e.g., after restart)
-    const text = row.content_type === "raw_text"
-      ? row.source
-      : await parseContentToText(row.source);
+    // Re-parse if not cached (e.g., after restart) — same pipeline as indexing, so the chunks match.
+    const { text } = await loadDocument(row.source, row.content_type);
     const chunks = chunkText(text);
     contentCache.set(knowledgeId, { text, chunks });
     return { text, chunks };
@@ -456,6 +463,16 @@ class PoCW {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/**
+ * Text (+ metadata) of a source. Raw text (uploads are parsed in the HTTP layer and stored as
+ * text) only goes through prepareText(), which is idempotent, so re-parsing after a restart
+ * yields the same text as indexing did.
+ */
+async function loadDocument(source: string, contentType: string, meta?: DocumentMeta): Promise<ParsedDocument> {
+  if (contentType === "raw_text") return prepareText(source, meta ?? {});
+  return parseSource(source);
+}
 
 function computeKnowledgeId(source: string): string {
   const normalized = normalizeSource(source).trim().toLowerCase();
@@ -544,6 +561,8 @@ async function deriveWebTitle(
 /**
  * Extract a human-readable title and description from content.
  *
+ * - Books: the title found in the file (EPUB dc:title, PDF info Title, Project Gutenberg
+ *   "Title:" header) when there is one.
  * - YouTube URLs: fetch real title via oEmbed (strict host check prevents false matches).
  * - Web pages: derive title with LLM from htmlTitle + URL + first 4k chars.
  * - Raw text: first non-empty line becomes the title.
@@ -551,9 +570,12 @@ async function deriveWebTitle(
 async function extractMetadata(
   source: string,
   text: string,
-  htmlTitle?: string | null
+  htmlTitle?: string | null,
+  knownTitle?: string
 ): Promise<{ title: string; description: string }> {
   const description = text.slice(0, 300).trim();
+
+  if (knownTitle) return { title: knownTitle.slice(0, 300), description };
 
   // ── YouTube ──────────────────────────────────────────────────────────────────
   if (isYouTubeStrict(source)) {

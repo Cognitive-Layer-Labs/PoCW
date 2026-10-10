@@ -1,68 +1,37 @@
 import pdfParse from "pdf-parse";
 import { JSDOM } from "jsdom";
-import { safeFetch } from "./safe-fetch";
+import { safeFetchBuffer } from "./safe-fetch";
+import { isEpub, parseEpub, EPUB_MIME, EpubError, xhtmlToText } from "./epub";
+import { looksLikeZip, ZipError } from "./zip-reader";
+import {
+  MAX_TEXT_CHARS,
+  DocumentMeta,
+  PreparedText,
+  prepareText,
+  normalizeParagraphs,
+  collapseWhitespace,
+  truncateText,
+  meaningfulMeta,
+} from "./book-text";
 
 /**
  * Parse content from a URL into plain text.
  * Supported parsers:
- * - PDF
- * - TXT
+ * - EPUB (application/epub+zip, *.epub, or an octet-stream body that is an EPUB archive)
+ * - PDF (text + Title/Author from the document info when meaningful)
+ * - TXT (paragraphs kept, hard wraps joined)
  * - Markdown (.md / .markdown)
  * - HTML
  * - YouTube transcript (HTTP transcript sources)
+ * Every result goes through prepareText(): Project Gutenberg license header/footer removed (its
+ * Title/Author kept as metadata) and the text cut to MAX_TEXT_CHARS.
  * Transport: http / https only. Every fetch of a user-supplied URL goes through
  * safeFetch (SSRF protection: private/internal targets and redirects to them are blocked).
  *
  * WS6: Errors propagate to the caller — no silent fallbacks.
  */
 export async function parseContentToText(url: string): Promise<string> {
-  const validationError = validateSourceUrl(url);
-  if (validationError) {
-    throw new Error(validationError);
-  }
-
-  if (isYouTube(url)) {
-    return await parseYouTube(url);
-  }
-
-  const res = await safeFetch(url);
-
-  if (!res.ok) {
-    throw new Error(`Failed to fetch content: ${url} (HTTP ${res.status})`);
-  }
-
-  const contentType = (res.headers.get("content-type") || "").toLowerCase();
-
-  if (isBinary(contentType)) {
-    throw new Error(`Unsupported binary content: ${url}`);
-  }
-
-  if (isPDF(contentType, url)) {
-    const buffer = Buffer.from(await res.arrayBuffer());
-    const parsePdf = pdfParse as unknown as (data: Buffer) => Promise<{ text: string }>;
-    const pdf = await parsePdf(buffer);
-    if (!pdf.text.trim()) {
-      throw new Error("No text found in PDF — it may be image-only");
-    }
-    return truncate(cleanText(pdf.text));
-  }
-
-  if (isMarkdown(contentType, url)) {
-    const text = await res.text();
-    return truncate(text.replace(/\u0000/g, "").trim());
-  }
-
-  if (isText(contentType, url)) {
-    const text = await res.text();
-    return truncate(cleanText(text));
-  }
-
-  if (isHTML(contentType, url)) {
-    const html = await res.text();
-    return truncate(cleanText(extractMainContent(html)));
-  }
-
-  throw new Error(`Unsupported content type: ${contentType}`);
+  return (await parseSource(url)).text;
 }
 
 /**
@@ -70,31 +39,176 @@ export async function parseContentToText(url: string): Promise<string> {
  * Only call this when you need the title; use parseContentToText otherwise.
  */
 export async function parseWebContentWithTitle(url: string): Promise<{ text: string; htmlTitle: string | null }> {
-  if (isYouTube(url)) {
-    const text = await parseContentToText(url);
-    return { text, htmlTitle: null };
-  }
+  const doc = await parseSource(url);
+  return { text: doc.text, htmlTitle: doc.htmlTitle ?? null };
+}
 
-  // Same protocol/scheme allowlist as parseContentToText (defense-in-depth, parity).
+/** Parsed document: text plus whatever metadata the format carries. */
+export interface ParsedDocument extends PreparedText {
+  /** HTML <title> (web pages only). */
+  htmlTitle?: string | null;
+}
+
+/** Largest download accepted for a URL source (books up to 40 MB, with headroom). */
+export const MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024;
+/** HTML larger than this is converted without jsdom (see parseSource). */
+const LARGE_HTML_CHARS = 1_000_000;
+/** Whole-request time budget for URL sources (a 40 MB book on a slow host needs more than 30 s). */
+const SOURCE_FETCH_TIMEOUT_MS = 120_000;
+
+/** Fetch and parse any supported URL source (see parseContentToText). */
+export async function parseSource(url: string): Promise<ParsedDocument> {
   const validationError = validateSourceUrl(url);
-  if (validationError) throw new Error(validationError);
-
-  const res = await safeFetch(url);
-  if (!res.ok) throw new Error(`Failed to fetch: ${url} (HTTP ${res.status})`);
-
-  const contentType = (res.headers.get("content-type") || "").toLowerCase();
-
-  if (isHTML(contentType, url)) {
-    const html = await res.text();
-    return {
-      text: truncate(cleanText(extractMainContent(html))),
-      htmlTitle: extractHtmlTitle(html),
-    };
+  if (validationError) {
+    throw new Error(validationError);
   }
 
-  // For non-HTML, fall back to the regular parser (no HTML title)
-  const text = await parseContentToText(url);
-  return { text, htmlTitle: null };
+  if (isYouTube(url)) {
+    return prepareText(await parseYouTube(url));
+  }
+
+  const res = await safeFetchBuffer(url, { maxBytes: MAX_DOWNLOAD_BYTES, timeoutMs: SOURCE_FETCH_TIMEOUT_MS });
+  if (!res.ok) {
+    throw new Error(`Failed to fetch content: ${url} (HTTP ${res.status})`);
+  }
+
+  const contentType = res.contentType;
+  const pathname = urlPath(res.url) || urlPath(url);
+  const body = res.body;
+
+  const genericBinary = contentType.includes("application/octet-stream") || isZipLike(contentType);
+  if (isEpubType(contentType, pathname) || (genericBinary && isEpub(body))) {
+    return parseEpubBuffer(body);
+  }
+  if (genericBinary) {
+    // Generic binary: accept only what the bytes prove to be a supported format.
+    if (isPdfBytes(body)) return parsePdfBuffer(body);
+    throw new Error(`Unsupported binary content: ${url}`);
+  }
+  if (isBinary(contentType)) {
+    throw new Error(`Unsupported binary content: ${url}`);
+  }
+
+  if (isPDF(contentType, pathname)) {
+    return parsePdfBuffer(body);
+  }
+
+  if (isMarkdown(contentType, pathname)) {
+    return prepareText(decodeUtf8(body).replace(/\u0000/g, "").replace(/\r\n?/g, "\n").trim());
+  }
+
+  if (isText(contentType, pathname)) {
+    return prepareText(normalizeParagraphs(decodeUtf8(body)));
+  }
+
+  if (isHTML(contentType, pathname)) {
+    const html = decodeUtf8(body);
+    // Book-sized HTML (e.g. a Project Gutenberg "read online" page) skips the jsdom pass: a DOM for
+    // megabytes of markup takes seconds and hundreds of MB of heap. The tag stripper used for EPUB
+    // chapters drops scripts/styles/nav and keeps the text.
+    const text = html.length > LARGE_HTML_CHARS ? xhtmlToText(html) : extractMainContent(html);
+    return { ...prepareText(collapseWhitespace(text)), htmlTitle: extractHtmlTitle(html) };
+  }
+
+  throw new Error(`Unsupported content type: ${contentType}`);
+}
+
+/* ================= uploads ================= */
+
+/** Upload rejected: `status` is the HTTP status to answer with (400, 415 or 422). */
+export class UploadParseError extends Error {
+  constructor(message: string, public readonly status: 400 | 415 | 422) {
+    super(message);
+    this.name = "UploadParseError";
+  }
+}
+
+/**
+ * Parse an uploaded file body:
+ *   application/epub+zip                       → EPUB
+ *   application/pdf                            → PDF
+ *   application/octet-stream / application/zip → EPUB or PDF when the bytes say so, else UTF-8 text
+ *   text/*                                     → UTF-8 text (text/markdown kept verbatim)
+ */
+export async function parseUpload(body: Buffer, contentType: string): Promise<PreparedText> {
+  const ct = contentType.toLowerCase();
+  if (ct.includes(EPUB_MIME) || (isZipLike(ct) && looksLikeZip(body))) {
+    if (!isEpub(body)) {
+      throw new UploadParseError("Not a valid EPUB file (missing application/epub+zip mimetype)", 422);
+    }
+    try {
+      return parseEpubBuffer(body);
+    } catch (err) {
+      throw new UploadParseError(uploadMessage(err, "Could not parse EPUB"), 422);
+    }
+  }
+  if (looksLikeZip(body) && isEpub(body)) {
+    // e.g. sent as application/octet-stream
+    try {
+      return parseEpubBuffer(body);
+    } catch (err) {
+      throw new UploadParseError(uploadMessage(err, "Could not parse EPUB"), 422);
+    }
+  }
+  if (ct.includes("pdf") || isPdfBytes(body)) {
+    let doc: PreparedText;
+    try {
+      doc = await parsePdfBuffer(body);
+    } catch (err) {
+      if (err instanceof UploadParseError) throw err;
+      throw new UploadParseError("Could not parse PDF", 422);
+    }
+    return doc;
+  }
+  if (body.subarray(0, 8192).includes(0)) {
+    throw new UploadParseError("Binary file not supported — upload a PDF, an EPUB or a text file", 415);
+  }
+  const raw = decodeUtf8(body);
+  const text = ct.includes("markdown")
+    ? raw.replace(/\u0000/g, "").replace(/\r\n?/g, "\n").trim()
+    : normalizeParagraphs(raw);
+  if (!text.trim()) {
+    throw new UploadParseError("Uploaded file is empty", 400);
+  }
+  return prepareText(text);
+}
+
+function uploadMessage(err: unknown, fallback: string): string {
+  return err instanceof EpubError || err instanceof ZipError ? err.message : fallback;
+}
+
+/* ================= format parsers ================= */
+
+function parseEpubBuffer(body: Buffer): PreparedText {
+  const epub = parseEpub(body);
+  return prepareText(epub.text, { title: epub.title, author: epub.author });
+}
+
+type PdfParseResult = { text: string; info?: Record<string, unknown> };
+
+async function parsePdfBuffer(body: Buffer): Promise<PreparedText> {
+  const parsePdf = pdfParse as unknown as (data: Buffer) => Promise<PdfParseResult>;
+  const pdf = await parsePdf(body);
+  if (!pdf.text.trim()) {
+    throw new UploadParseError("No text found in PDF — it may be image-only", 422);
+  }
+  const meta: DocumentMeta = {
+    title: meaningfulMeta(pdf.info?.Title, "title"),
+    author: meaningfulMeta(pdf.info?.Author, "author"),
+  };
+  return prepareText(collapseWhitespace(pdf.text), meta);
+}
+
+/**
+ * UTF-8 decode, reading at most what MAX_TEXT_CHARS can need (3 bytes per character covers
+ * every BMP script) so a 40 MB text upload never becomes a 40 M-character string.
+ */
+function decodeUtf8(body: Buffer): string {
+  const maxBytes = MAX_TEXT_CHARS * 3 + 64 * 1024;
+  const s = body.toString("utf8", 0, Math.min(body.length, maxBytes));
+  // Keep generous headroom for the Gutenberg header/footer, which is stripped before the final cut.
+  const text = s.charCodeAt(0) === 0xfeff ? s.slice(1) : s;
+  return text.length > MAX_TEXT_CHARS + 200_000 ? truncateText(text, MAX_TEXT_CHARS + 200_000) : text;
 }
 
 /* ================= validation ================= */
@@ -125,32 +239,52 @@ function validateSourceUrl(value: string): string | null {
 
 /* ================= type detection ================= */
 
-function isPDF(contentType: string, url: string): boolean {
-  return contentType.includes("application/pdf") || url.endsWith(".pdf");
+/** Lower-cased URL path without query/fragment ("" when unparsable). */
+function urlPath(url: string): string {
+  try {
+    return new URL(url).pathname.toLowerCase();
+  } catch {
+    return "";
+  }
 }
 
-function isText(contentType: string, url: string): boolean {
-  return contentType.includes("text/plain") || url.endsWith(".txt");
+function isEpubType(contentType: string, pathname: string): boolean {
+  return contentType.includes(EPUB_MIME) || pathname.endsWith(".epub");
 }
 
-function isMarkdown(contentType: string, url: string): boolean {
+function isZipLike(contentType: string): boolean {
+  return contentType.includes("application/zip") || contentType.includes("application/x-zip");
+}
+
+function isPdfBytes(body: Buffer): boolean {
+  return body.subarray(0, 5).toString("latin1") === "%PDF-";
+}
+
+function isPDF(contentType: string, pathname: string): boolean {
+  return contentType.includes("application/pdf") || pathname.endsWith(".pdf");
+}
+
+function isText(contentType: string, pathname: string): boolean {
+  return contentType.includes("text/plain") || pathname.endsWith(".txt");
+}
+
+function isMarkdown(contentType: string, pathname: string): boolean {
   return (
     contentType.includes("text/markdown") ||
-    url.endsWith(".md") ||
-    url.endsWith(".markdown")
+    pathname.endsWith(".md") ||
+    pathname.endsWith(".markdown")
   );
 }
 
-function isHTML(contentType: string, url: string): boolean {
-  return contentType.includes("text/html") || url.endsWith(".html");
+function isHTML(contentType: string, pathname: string): boolean {
+  return contentType.includes("text/html") || pathname.endsWith(".html") || pathname.endsWith(".htm");
 }
 
 function isBinary(contentType: string): boolean {
   return (
     contentType.startsWith("video/") ||
     contentType.startsWith("audio/") ||
-    contentType.startsWith("image/") ||
-    contentType === "application/octet-stream"
+    contentType.startsWith("image/")
   );
 }
 
@@ -216,8 +350,9 @@ export async function rederiveTitle(source: string, existingText?: string): Prom
       return null; // YouTube but oEmbed failed
     }
 
-    // Web page: re-fetch with HTML title extraction
-    const parsed = await parseWebContentWithTitle(source);
+    // Re-fetch: books carry their own title (EPUB/PDF metadata, Gutenberg header).
+    const parsed = await parseSource(source);
+    if (parsed.title) return parsed.title;
     const text = existingText ?? parsed.text;
 
     // Call LLM (dynamic import to avoid circular deps from sdk/index.ts)
@@ -317,16 +452,8 @@ function extractMainContent(html: string): string {
   return doc.body?.textContent || "";
 }
 
-function cleanText(text: string): string {
-  return text
-    .replace(/\s+/g, " ")
-    .replace(/\u0000/g, "")
-    .trim();
-}
-
-function truncate(text: string, limit = 500_000): string {
-  return text.slice(0, limit);
-}
+const cleanText = collapseWhitespace;
+const truncate = (text: string): string => truncateText(text);
 
 /**
  * Split text into overlapping chunks for large documents.

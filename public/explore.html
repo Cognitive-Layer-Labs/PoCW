@@ -160,8 +160,8 @@
       <div class="or-divider">or upload a file</div>
 
       <div class="upload-area" id="upload-area">
-        <input type="file" id="file-input" accept=".txt,.pdf,.md" />
-        <span id="upload-label">Click or drag a .txt / .pdf file here</span>
+        <input type="file" id="file-input" accept=".txt,.pdf,.md,.epub" />
+        <span id="upload-label">Click or drag a .txt / .md / .pdf / .epub file here</span>
       </div>
 
       <button class="btn btn-primary btn-full" id="index-btn" onclick="doIndex()">Index Content</button>
@@ -304,7 +304,7 @@ const fileInput = document.getElementById("file-input");
 const uploadArea = document.getElementById("upload-area");
 fileInput.addEventListener("change", () => {
   const f = fileInput.files[0];
-  document.getElementById("upload-label").textContent = f ? `📄 ${f.name}` : "Click or drag a .txt / .pdf file here";
+  document.getElementById("upload-label").textContent = f ? `📄 ${f.name}` : "Click or drag a .txt / .md / .pdf / .epub file here";
   uploadArea.classList.toggle("has-file", !!f);
   if (f) document.getElementById("url-input").value = "";
 });
@@ -354,7 +354,10 @@ async function doIndex() {
   try {
     let result;
     if (file) {
-      const ct = file.name.endsWith(".pdf") ? "application/pdf" : "text/plain";
+      const name = file.name.toLowerCase();
+      const ct = name.endsWith(".pdf") ? "application/pdf"
+        : name.endsWith(".epub") ? "application/epub+zip"
+        : name.endsWith(".md") ? "text/markdown" : "text/plain";
       const buf = await file.arrayBuffer();
       const r = await fetch("/api/upload", { method: "POST", headers: { "Content-Type": ct, ...authHeaders() }, body: buf });
       result = await r.json();

@@ -4,6 +4,9 @@ import type { Server } from "http";
 import app, { parseTrustProxy, setPoCWInstance } from "../src/app";
 import { PoCWError } from "../src/sdk/types";
 import { validateConfig } from "../src/sdk/index";
+import Database from "better-sqlite3";
+import { __setDbForTest, insertContent, updateMetadata } from "../src/sdk/content-store";
+import { makeEpub } from "./helpers/fixtures";
 
 /**
  * HTTP-layer tests (no FalkorDB/Redis): auth, admin gating, rate limiting, input validation.
@@ -21,8 +24,10 @@ describe("HTTP API", function () {
       if (id === "missing") throw new PoCWError("CONTENT_NOT_FOUND", "nope");
       return { knowledgeId: id, status: id === "busy" ? "indexing" : id === "bad" ? "failed" : "ready", contentId: 7 };
     },
-    async index(source: string, opts?: { asText?: boolean }) {
-      return { knowledgeId: opts?.asText ? "text-id" : "url-id", status: "indexing", contentId: 1, source };
+    lastIndex: undefined as { source: string; opts?: { asText?: boolean; meta?: Record<string, unknown> } } | undefined,
+    async index(source: string, opts?: { asText?: boolean; meta?: Record<string, unknown> }) {
+      fakePoCW.lastIndex = { source, opts };
+      return { knowledgeId: opts?.asText ? "text-id" : "url-id", status: "indexing", contentId: 1 };
     },
     listContent() {
       return { rows: [], total: 0 };
@@ -136,6 +141,43 @@ describe("HTTP API", function () {
       body: Buffer.from("x"),
     });
     expect(wrongType.status).to.equal(415);
+  });
+
+  it("POST /api/upload accepts EPUB (application/epub+zip or sniffed octet-stream) with its metadata", async () => {
+    for (const ct of ["application/epub+zip", "application/octet-stream"]) {
+      const res = await fetch(base + "/api/upload", { method: "POST", headers: { "Content-Type": ct }, body: makeEpub() });
+      expect(res.status, ct).to.equal(202);
+      expect(fakePoCW.lastIndex!.opts).to.deep.equal({ asText: true, meta: { title: "The Test Book", author: "Jane Author" } });
+      expect(fakePoCW.lastIndex!.source).to.contain("bright cold day");
+    }
+  });
+
+  it("POST /api/upload accepts books up to 40 MB and answers 413 above", async () => {
+    const big = Buffer.alloc(12 * 1024 * 1024, "book text ");
+    expect((await fetch(base + "/api/upload", { method: "POST", headers: { "Content-Type": "text/plain" }, body: big })).status).to.equal(202);
+    const tooBig = Buffer.alloc(40 * 1024 * 1024 + 1024, "a");
+    const res = await fetch(base + "/api/upload", { method: "POST", headers: { "Content-Type": "text/plain" }, body: tooBig });
+    expect(res.status).to.equal(413);
+  });
+
+  it("GET /api/index/:id includes the author when one was detected", async () => {
+    const db = new Database(":memory:");
+    __setDbForTest(db);
+    try {
+      db.exec(`CREATE TABLE content_index (knowledge_id TEXT PRIMARY KEY, content_type TEXT NOT NULL, source TEXT NOT NULL,
+        title TEXT, description TEXT, status TEXT NOT NULL DEFAULT 'pending', error TEXT, content_id INTEGER, content_hash TEXT,
+        chunk_count INTEGER DEFAULT 0, created_at TEXT NOT NULL DEFAULT (datetime('now')), indexed_at TEXT,
+        usage_count INTEGER DEFAULT 0, last_used_at TEXT)`);
+      __setDbForTest(db); // migrate the fresh table (adds hidden/author)
+      await insertContent("ok", "raw_text", "text", 7);
+      await updateMetadata("ok", "Pride and Prejudice", "", "Jane Austen");
+      const body = await (await get("/api/index/ok")).json();
+      expect(body).to.include({ title: "Pride and Prejudice", author: "Jane Austen" });
+      expect(body).to.not.have.property("source"); // uploads are not echoed back
+    } finally {
+      __setDbForTest(null);
+      db.close();
+    }
   });
 
   it("POST /api/verify validates knowledgeId and subject types", async () => {
