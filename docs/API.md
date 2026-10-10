@@ -465,8 +465,10 @@ interface PoCWConfig {
   depth of a question, not its wording. The learner's ability θ moves the target up or
   down by at most ±1 around that centre. See [OPTIONS.md §2](OPTIONS.md#2-concept-mastery-loop).
 - **`q_types`**: with several types, the type follows the item's target difficulty among the
-  allowed types only (true/false for easier items, then MCQ, then open). If generating the
-  preferred type fails, the next allowed type is tried — never a type outside `q_types`.
+  allowed types only (true/false for easier items, then MCQ, then open), never the same type more
+  than twice in a row, and sessions of 4+ questions use every allowed type at least once. If
+  generating the preferred type fails, the next allowed type is tried — never a type outside
+  `q_types`.
 
 ### `VerifyQuestion`
 

@@ -85,3 +85,71 @@ export function chunksMentioning(chunks: string[], label: string | undefined): n
   }
   return [];
 }
+
+// ─── Front matter (prefaces, translators' introductions, contents) ───────────
+
+/** Front-matter detection only runs on book-sized texts (≥ 10 chunks ≈ 35 000 characters). */
+const MIN_BOOK_CHUNKS = 10;
+/** Headings / phrases that mark a preface, an introduction, a translator's note or a contents list. */
+const FRONT_MATTER_MARKERS =
+  /\b(?:INTRODUCTION|PREFACE|FOREWORD|TRANSLATOR['’]?S?|CONTENTS)\b|\bTranslated\s+(?:from\s+[^\n]{0,60}?\s+)?by\b|\bTranslator['’]s\b|^[^\S\n]*(?:Introduction|Preface|Foreword|Contents|Table of Contents)[^\S\n]*$/m;
+/** "Chapter I", "CHAPTER 1.", "Book One", "Part the First" at the start of a line. */
+const FIRST_HEADING = /^[^\S\n]*(?:chapter|book|part)[^\S\n]+(?:1|i|one|the\s+first)\b[^\n]*/gim;
+/** Any numbered chapter/book/part heading (a contents list has the next one right after the first). */
+const ANY_HEADING = /\b(?:chapter|book|part)\s+(?:\d+|[ivxlc]+\b|one|two|three|the\s+(?:first|second))/i;
+
+/** Index of the chunk where the body (the first chapter's text, not its contents entry) starts. */
+function bodyStartChunk(chunks: string[]): number {
+  const limit = Math.ceil(chunks.length * 0.5);
+  for (let i = 0; i < limit; i++) {
+    const chunk = chunks[i] ?? "";
+    FIRST_HEADING.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = FIRST_HEADING.exec(chunk))) {
+      const after = chunk.slice(m.index + m[0].length, m.index + m[0].length + 300);
+      if (after.length < 200) break;              // too close to the chunk end; the next chunk overlaps
+      if (!ANY_HEADING.test(after)) return i;     // followed by text, not by the next contents entry
+    }
+  }
+  return -1;
+}
+
+/**
+ * Chunks that look like front matter: everything before the first chapter when the opening of
+ * the book has a contents list / preface / introduction (within the first half of the text), else
+ * chunks in the first ~10% that carry such a heading. Empty for short texts. Used to keep question
+ * passages on the work itself (e.g. The Art of War's 80 000-character translator's introduction).
+ */
+export function frontMatterChunks(chunks: string[]): Set<number> {
+  const out = new Set<number>();
+  const n = chunks.length;
+  if (n < MIN_BOOK_CHUNKS) return out;
+  const head = Math.max(1, Math.ceil(n * 0.1));
+  const marked = (i: number) => FRONT_MATTER_MARKERS.test(chunks[i] ?? "");
+  const body = bodyStartChunk(chunks);
+  if (body > 0) {
+    let hasMarker = false;
+    for (let i = 0; i < Math.min(body, head) && !hasMarker; i++) hasMarker = marked(i);
+    if (hasMarker) {
+      for (let i = 0; i < body; i++) out.add(i);
+      return out;
+    }
+  }
+  if (body === 0) return out; // the first chapter starts in the first chunk
+  for (let i = 0; i < head; i++) if (marked(i)) out.add(i);
+  return out;
+}
+
+/**
+ * Candidate chunks for a question, front matter de-prioritised: candidates outside the front matter;
+ * if all candidates are front matter (or there are none), any chunk outside it; if the whole text
+ * is front matter, the original candidates.
+ */
+export function preferBodyChunks(candidates: number[], chunkCount: number, frontMatter: Set<number>): number[] {
+  if (frontMatter.size === 0) return candidates;
+  const body = candidates.filter(i => !frontMatter.has(i));
+  if (body.length > 0) return body;
+  const anyBody: number[] = [];
+  for (let i = 0; i < chunkCount; i++) if (!frontMatter.has(i)) anyBody.push(i);
+  return anyBody.length > 0 ? anyBody : candidates;
+}

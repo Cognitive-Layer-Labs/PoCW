@@ -5,8 +5,12 @@
  *   - MCQ only: correct_option — which option is correct according to the passage
  *     (criteria = the 4 options). Jev picks a different option than the key with
  *     confidence ≥ 0.6 → regenerate.
- *   - answerable_from_passage (yes / no) and plainly_worded (yes / no): either "no" with
- *     confidence ≥ 0.7 → regenerate.
+ *   - True/false only: statement_true — is the statement true or false according to the passage?
+ *     Jev disagrees with the key with confidence ≥ 0.6 → regenerate (key_mismatch).
+ *   - answerable_from_passage, plainly_worded and about_the_work (yes / no): any "no" with
+ *     confidence ≥ 0.7 → regenerate. about_the_work = about the book's own story / argument, not
+ *     its introduction, translator, editions, commentators or history.
+ * MCQ options are shuffled in code before the check, so the key compared here is the shown one.
  *
  * The caller regenerates at most once and keeps the question whenever the check fails or errors.
  * Outcomes are stored on the call-log row ("pass" / "regenerate:<reasons>") and counted in memory.
@@ -19,12 +23,12 @@ import type { GeneratedQuestion } from "./question-generation-agent";
 
 /** Jev must be at least this sure that another MCQ option is the right one. */
 export const KEY_MISMATCH_CONFIDENCE = 0.6;
-/** Jev must be at least this sure that a question is unanswerable / not plainly worded. */
+/** Jev must be at least this sure that a question is unanswerable / not plain / not about the work. */
 export const REJECT_CONFIDENCE = 0.7;
 const PASSAGE_CHARS = 6000;
 const LETTERS = ["A", "B", "C", "D"];
 
-export type CheckReason = "key_mismatch" | "not_answerable" | "not_plain";
+export type CheckReason = "key_mismatch" | "not_answerable" | "not_plain" | "not_about_work";
 
 export interface QuestionCheckResult {
   /** skipped: no question-check-model configured; error: the check failed (question kept). */
@@ -32,7 +36,7 @@ export interface QuestionCheckResult {
   reasons: CheckReason[];
   /** Instructions for the regeneration prompt (status "regenerate"). */
   feedback?: string;
-  /** MCQ: the option Jev considers correct. */
+  /** MCQ: the option Jev considers correct; true/false: "true" / "false". */
   jevChoice?: string;
 }
 
@@ -46,7 +50,7 @@ export interface QuestionCheckStats {
 
 const stats: QuestionCheckStats = {
   checked: 0, passed: 0, regenerated: 0, errors: 0,
-  reasons: { key_mismatch: 0, not_answerable: 0, not_plain: 0 },
+  reasons: { key_mismatch: 0, not_answerable: 0, not_plain: 0, not_about_work: 0 },
 };
 
 /** In-process counters since start (the call log keeps the persistent record). */
@@ -56,7 +60,7 @@ export function getQuestionCheckStats(): QuestionCheckStats {
 
 export function __resetQuestionCheckStatsForTest(): void {
   stats.checked = stats.passed = stats.regenerated = stats.errors = 0;
-  stats.reasons = { key_mismatch: 0, not_answerable: 0, not_plain: 0 };
+  stats.reasons = { key_mismatch: 0, not_answerable: 0, not_plain: 0, not_about_work: 0 };
 }
 
 let lastErrorLog = 0;
@@ -89,6 +93,16 @@ export function buildQuestionCheckRequest(
       criteria: options,
     };
   }
+  if (isTF) {
+    questions.statement_true = {
+      type: "choice",
+      instructions: "According to the passage, is the statement true or false?",
+      criteria: {
+        true: "True: the passage says or clearly shows this.",
+        false: "False: the passage says or clearly shows something different.",
+      },
+    };
+  }
   questions.answerable_from_passage = {
     type: "choice",
     instructions: isTF
@@ -112,6 +126,16 @@ export function buildQuestionCheckRequest(
           no: "Academic or jargon-heavy, multi-part, long-winded or convoluted.",
         },
   };
+  questions.about_the_work = {
+    type: "choice",
+    instructions: isTF
+      ? "Is the statement about the work itself (its story, characters, ideas or argument)?"
+      : "Is the question about the work itself (its story, characters, ideas or argument)?",
+    criteria: {
+      yes: "Yes: it is about the book's own story, characters, events, ideas or argument.",
+      no: "No: it is about the book's preface or introduction, its author's life, the translator or editor, editions, footnotes, a commentator's note or an anecdote told in the notes, dating or publication history.",
+    },
+  };
   return { model, state, questions };
 }
 
@@ -128,10 +152,22 @@ export function interpretQuestionCheck(
     const key = (q.correctAnswer ?? "").trim().toUpperCase();
     if (key && a.choice !== key && a.confidence >= KEY_MISMATCH_CONFIDENCE) reasons.push("key_mismatch");
   }
+  if (q.type === "true_false" && answers.statement_true) {
+    const a = choiceAnswer({ answers }, "statement_true");
+    jevChoice = a.choice;
+    const key = (q.correctAnswer ?? "").trim().toLowerCase();
+    if ((key === "true" || key === "false") && a.choice !== key && a.confidence >= KEY_MISMATCH_CONFIDENCE) {
+      reasons.push("key_mismatch");
+    }
+  }
   const answerable = choiceAnswer({ answers }, "answerable_from_passage");
   if (answerable.choice === "no" && answerable.confidence >= REJECT_CONFIDENCE) reasons.push("not_answerable");
   const plain = choiceAnswer({ answers }, "plainly_worded");
   if (plain.choice === "no" && plain.confidence >= REJECT_CONFIDENCE) reasons.push("not_plain");
+  if (answers.about_the_work) {
+    const about = choiceAnswer({ answers }, "about_the_work");
+    if (about.choice === "no" && about.confidence >= REJECT_CONFIDENCE) reasons.push("not_about_work");
+  }
   return { reasons, jevChoice };
 }
 
@@ -139,11 +175,19 @@ export function interpretQuestionCheck(
 export function regenerationFeedback(q: GeneratedQuestion, reasons: CheckReason[], jevChoice?: string): string {
   const kind = q.type === "true_false" ? "statement" : "question";
   const lines = [`A quality check rejected the previous ${kind}: "${q.question}"`];
-  if (reasons.includes("key_mismatch")) {
-    const idx = jevChoice ? LETTERS.indexOf(jevChoice) : -1;
-    const text = idx >= 0 && q.options ? ` ("${q.options[idx]}")` : "";
+  if (reasons.includes("key_mismatch") && q.type === "true_false") {
     lines.push(
-      `- Its answer key looked wrong: the passage seems to support option ${jevChoice}${text}, not ${q.correctAnswer}. ` +
+      `- Its answer looked wrong: the passage suggests the statement is ${String(jevChoice).toUpperCase()}, ` +
+      `but it was marked ${String(q.correctAnswer).toUpperCase()}. Make sure the statement has the TARGET_ANSWER according to CONTENT_TEXT.`,
+    );
+  } else if (reasons.includes("key_mismatch")) {
+    // Option texts, not letters: the options were shuffled after generation.
+    const option = (letter: string | undefined) => {
+      const idx = letter ? LETTERS.indexOf(letter.trim().toUpperCase()) : -1;
+      return idx >= 0 && q.options?.[idx] ? `"${q.options[idx]}"` : `option ${letter}`;
+    };
+    lines.push(
+      `- Its answer key looked wrong: the passage seems to support ${option(jevChoice)}, not ${option(q.correctAnswer)}. ` +
       `Make sure exactly one option is correct according to CONTENT_TEXT and that correctAnswer points to it.`,
     );
   }
@@ -152,6 +196,12 @@ export function regenerationFeedback(q: GeneratedQuestion, reasons: CheckReason[
   }
   if (reasons.includes("not_plain")) {
     lines.push("- It was not plainly worded. Use one short sentence (at most about 20 words) in everyday words, asking for one thing — like a friend who read the book.");
+  }
+  if (reasons.includes("not_about_work")) {
+    lines.push(
+      "- It was about the book's front or back matter (introduction, translator, editions, commentators or history), " +
+      "not the work itself. Ask about the work's own story, characters, ideas or argument.",
+    );
   }
   lines.push(`Write a different ${kind}; do not reuse the rejected wording.`);
   return lines.join("\n");

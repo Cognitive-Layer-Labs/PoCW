@@ -200,16 +200,41 @@ The question-generation LLM assigns the final Bloom level of each question (it m
 friend who read the book asking about it: one sentence of at most ~20 words, everyday words, one
 clear answer that is in the passage; no jargon ("analyze", "evaluate the significance", "to what
 extent", "according to the passage"…), no multi-part questions, no invented scenarios. Difficulty
-changes the depth (the patterns above), never the phrasing. MCQ: 4 short options of similar length,
-exactly one correct per the text. True/false: one simple fact; the engine picks the target answer
-(true/false) at random for each statement so about half are false.
+changes the depth (the patterns above), never the phrasing. Questions are about the work itself
+(story, characters, ideas, arguments) — never prefaces, translators' / editors' introductions,
+footnotes, commentary, publication history or tables of contents — and never mention "the passage",
+"the excerpt" or "the text" (readers never saw a passage). MCQ: 4 short options of similar length,
+exactly one correct per the text. True/false: ONE simple claim (≤ ~15 words) about an important
+event, character or idea; the engine picks the target answer (true/false) at random for each
+statement so about half are false. Open questions: key points are the facts that *answer* the
+question, never a restatement of it.
+
+**Post-processing in code** (`question-generation-agent.ts`):
+- MCQ options are **shuffled** (Fisher–Yates) after every generation and regeneration and
+  `correctAnswer` is remapped, so the key's position is uniformly random (models put it first).
+- Leading/trailing source frames are stripped ("According to this passage, …", "In the passage, …",
+  "…, according to the commentators' explanation?"), keeping the sentence capitalised.
+- Cheap style check → **one** rewrite with a note: a true/false statement over 25 words or joining
+  two facts (", and", ", while", ", just before", ";"), or any question that still mentions the
+  passage / excerpt / text. The rewrite is kept as it is.
+- Open key points that only restate the question are dropped (when others remain).
+
+**Source passages** skip a book's front matter when the book has other text: when the opening has a
+contents list / preface / introduction, everything before the first chapter heading ("Chapter I",
+"Book One", "Part 1" followed by text, not by the next contents entry, within the first half of
+the book) is avoided — The Art of War's 80 000-character translator's introduction, for example;
+without such a heading, chunks in the first ~10% carrying INTRODUCTION / PREFACE / TRANSLATOR /
+"Translated by" / CONTENTS are avoided. Texts under 10 chunks are not affected.
 
 **Question check (decisions model, `question-check-model`).** Before a question is shown, one Jev
 call asks: for MCQ, which option is correct according to the passage (criteria = the 4 options);
-for every type, `answerable_from_passage` (yes/no) and `plainly_worded` (yes/no). If Jev picks a
-different MCQ option than the key with confidence ≥ 0.6, or answers "no" to either yes/no question
-with confidence ≥ 0.7, the question is regenerated **once** with that feedback (the regenerated
-question is used as is). A failed check, or a failed regeneration, keeps the original question.
+for true/false, whether the statement is true or false (`statement_true`); for every type,
+`answerable_from_passage`, `plainly_worded` and `about_the_work` (yes: the book's own story /
+argument; no: its introduction, translator, editions, commentators or history). The MCQ key
+compared is the shuffled one the learner sees. If Jev disagrees with the MCQ / true-false key with
+confidence ≥ 0.6, or answers "no" to any yes/no question with confidence ≥ 0.7, the question is
+regenerated **once** with that feedback (the regenerated question is used as is). A failed check,
+or a failed regeneration, keeps the original question.
 Outcomes are stored on the call-log row and summarised in `GET /api/usage` (`quality.questionCheck`).
 
 ---
@@ -232,6 +257,13 @@ allowed type nearest `b_target` wins (ties → the harder type), so with a subse
 | `mcq` + `true_false` | true_false below −0.5, mcq above |
 | `open` + `true_false` | true_false below 0, open above |
 | `open` + `mcq` | mcq below 0.5, open above |
+
+**Variety.** Difficulty stays the primary driver, with two rules on top (each takes the next-closest
+allowed type to `b_target`): never the same type more than twice in a row when another type is
+allowed, and sessions of ≥ 4 questions use every allowed type at least once where feasible (once the
+questions left are no more than the allowed types not used yet, an unused type is picked). With all
+three types an easy 5-question session goes e.g. TF, TF, MCQ, TF, open. The history this needs is
+the session's question history, which the Redis snapshot keeps.
 
 If the chosen type cannot be generated, the next allowed type (by the same distance) is tried; if
 none can, the request fails — the engine never substitutes a type outside `q_types`.

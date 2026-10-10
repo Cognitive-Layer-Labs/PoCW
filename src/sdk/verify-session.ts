@@ -32,7 +32,7 @@ import {
   GradeResult,
   QuestionGenerationError,
 } from "../services/question-generator";
-import { selectChunkIndex, chunksMentioning } from "../services/session-manager";
+import { selectChunkIndex, chunksMentioning, frontMatterChunks, preferBodyChunks } from "../services/session-manager";
 import { getContent } from "./content-store";
 import { runWithUsageContext } from "../services/usage-context";
 import { recordSessionFinished } from "../services/usage-store";
@@ -77,6 +77,41 @@ export function rankQuestionTypes(b_target: number, allowed: readonly QuestionTy
     const dy = Math.abs(b_target - TYPE_DIFFICULTY_CENTRE[y]);
     return dx - dy || TYPE_DIFFICULTY_CENTRE[y] - TYPE_DIFFICULTY_CENTRE[x];
   });
+}
+
+/** Never ask the same type more than this many times in a row when another type is allowed. */
+export const MAX_SAME_TYPE_RUN = 2;
+/** Sessions at least this long use every allowed type at least once (where feasible). */
+export const COVER_ALL_TYPES_FROM = 4;
+
+/**
+ * Type order for the next question of a session: difficulty first (rankQuestionTypes), then two
+ * variety rules, each taking the next-closest allowed type to the target:
+ *   - never more than MAX_SAME_TYPE_RUN of the same type in a row (when another type is allowed);
+ *   - sessions of ≥ COVER_ALL_TYPES_FROM questions use each allowed type at least once: once the
+ *     questions left are no more than the allowed types not used yet, an unused type is picked.
+ * `asked` = types already asked in this session, in order (from the question history, which the
+ * Redis snapshot keeps). The tail of the list is the fallback order when generation fails.
+ */
+export function planQuestionTypes(
+  b_target: number,
+  allowed: readonly QuestionType[],
+  asked: readonly QuestionType[],
+  totalQuestions: number,
+): QuestionType[] {
+  const ranked = rankQuestionTypes(b_target, allowed);
+  if (ranked.length <= 1) return ranked;
+  let pick = ranked[0];
+  const remaining = totalQuestions - asked.length; // including the question being picked
+  const unused = ranked.filter(t => !asked.includes(t));
+  if (totalQuestions >= COVER_ALL_TYPES_FROM && unused.length > 0 && remaining <= unused.length) {
+    pick = unused[0];
+  }
+  const run = asked.slice(-MAX_SAME_TYPE_RUN);
+  if (run.length === MAX_SAME_TYPE_RUN && run.every(t => t === pick)) {
+    pick = ranked.find(t => t !== pick) ?? pick;
+  }
+  return [pick, ...ranked.filter(t => t !== pick)];
 }
 
 /** Question type for an item target — always one of `allowed` (see rankQuestionTypes). */
@@ -157,6 +192,8 @@ export class VerifySession {
   private _currentTarget: { conceptId: string | null; edgeDirection: 'direct' | 'incoming' | 'outgoing' } = { conceptId: null, edgeDirection: 'direct' };
   private _complete: boolean = false;
   private _result: PoCWResult | null = null;
+  /** Front-matter chunk indices (derived from the chunks; recomputed after a snapshot restore). */
+  private _frontMatter?: Set<number>;
 
   constructor(
     contentId: number,
@@ -222,15 +259,20 @@ export class VerifySession {
     const previousQuestions = this.questionHistory.map(q => q.question);
     // Source passage: a least-used chunk that mentions the targeted concept (long books have
     // hundreds of chunks, most of which say nothing about a given concept); any chunk otherwise.
+    // Front matter (prefaces, translators' introductions, contents) is avoided when the book has
+    // other text: questions should be about the work itself.
     const label = target.targetConceptId ? this.conceptMastery.get(target.targetConceptId)?.label : undefined;
-    const chunkIdx = selectChunkIndex(this.chunkUsageCount, chunksMentioning(this.chunks, label));
+    this._frontMatter ??= frontMatterChunks(this.chunks);
+    const candidates = preferBodyChunks(chunksMentioning(this.chunks, label), this.chunks.length, this._frontMatter);
+    const chunkIdx = selectChunkIndex(this.chunkUsageCount, candidates);
     this.chunkUsageCount[chunkIdx]++;
     this._currentChunkIndex = chunkIdx;
 
-    // Preferred type first; if its generator gives up, fall back to the next *allowed* type
-    // (never to a type outside config.q_types).
+    // Preferred type first (difficulty, then variety: see planQuestionTypes); if its generator gives
+    // up, fall back to the next *allowed* type (never to a type outside config.q_types).
+    const asked = this.questionHistory.map(q => q.type);
     let lastError: unknown;
-    for (const qType of rankQuestionTypes(target.b_target, this.config.q_types)) {
+    for (const qType of planQuestionTypes(target.b_target, this.config.q_types, asked, this._maxQuestions)) {
       try {
         const question = await generateQuestion(
           this.contentId,
@@ -593,6 +635,7 @@ export class VerifySession {
   /** Rehydrate chunks after loading from snapshot — called by app.ts after loadSession. */
   rehydrateChunks(chunks: string[]): void {
     (this as any).chunks = chunks;
+    this._frontMatter = undefined;
     // The text pipeline can change between engine versions (e.g. a re-parse after an upgrade);
     // keep the usage counters aligned with the chunks actually available.
     const usage = this.chunkUsageCount;

@@ -111,16 +111,29 @@ kaqg-prompt: |
   - CONTENT_TEXT: the passage. The answer MUST be in it.
   - Sometimes EDGE_FOCUS (ask about causes or consequences) or EVALUATOR_FEEDBACK (fix those problems).
 
+  WHAT TO ASK ABOUT
+  - Only the work itself: its story, characters, events, ideas and arguments.
+  - Skip prefaces, translators' or editors' introductions, footnotes, notes and commentary,
+    publication history, dedications and tables of contents. Never ask who wrote, translated,
+    edited or dated the book, or what scholars or commentators think. If CONTENT_TEXT is mostly
+    such material, ask about an idea of the work itself that it quotes or explains.
+  - In annotated editions, ask about the author's own text, not the commentators' notes or the
+    historical anecdotes told in them.
+  - Prefer important events, characters and ideas over minor details.
+  - Never ask about disclaimers, licences, copyright or website navigation.
+
   HOW IT MUST SOUND
   - One sentence, at most about 20 words, ending with "?".
   - Everyday words. Use the book's own names for people, places and things.
   - Exactly one clear answer, stated or clearly shown in CONTENT_TEXT.
-  - Ask about the story or the ideas themselves, never about "the passage", "the text" or the author's choices.
+  - The reader never saw a passage, only the book. Never mention "the passage", "the excerpt",
+    "the text", "the author" or "the commentators"; never start with "According to ..." or
+    "In the passage, ..." and never end with "..., according to ...?". Ask about the story or
+    ideas directly.
   - Never use: analyze, critique, evaluate, assess, discuss, examine, significance, implications,
-    "in what ways", "to what extent", "according to the passage", "according to the text", "how does the author".
+    "in what ways", "to what extent", "how does the author".
   - No multi-part questions (no "... and why?", no "name three ..."), no invented scenarios or
     modern-day situations, no trick wording, no double negatives.
-  - Never ask about disclaimers, licences, copyright, website navigation or the book's front/back matter.
 
   DEPTH: difficulty changes how deep the question goes, never how fancy it sounds.
   - Remember: who / what / where. One fact.
@@ -130,7 +143,8 @@ kaqg-prompt: |
   - Analyze: how two things in the book are connected, or what led to something.
   TARGET_BLOOM_LEVEL wins over the level shown next to a concept.
 
-  EXAMPLES (Alice's Adventures in Wonderland). They all sound alike; only the depth changes.
+  EXAMPLES (Alice's Adventures in Wonderland) show the style only: never copy them, even for Alice.
+  They all sound alike; only the depth changes.
   - Gentle: "Who is always late in the first chapter?"
   - Standard: "Why does Alice follow the White Rabbit down the hole?"
   - Standard: "What does the Cheshire Cat leave behind when it vanishes?"
@@ -141,11 +155,15 @@ kaqg-prompt: |
 
   ANSWER FIELDS
   - modelAnswer: 1-3 plain sentences that fully answer the question, as the book tells it.
-  - keyPoints: 2-4 short facts (each under about 12 words) that a correct answer must contain, each
-    checkable against CONTENT_TEXT. Only what the question actually asks for: a question with a
-    one-fact answer (who / what / where) gets 1-2 key points, never padding.
+  - keyPoints: 1-4 short facts (each under about 12 words) that ANSWER the question: the who /
+    what / reason a correct answer must give, each checkable against CONTENT_TEXT. Never restate
+    the question or its premise, and never padding: a one-fact answer (who / what / where) gets
+    1-2 key points.
     Example for "Why is it always six o'clock at the Mad Tea-Party?":
     ["The Hatter quarrelled with Time", "Since then Time keeps it at six o'clock", "Six o'clock is tea-time, so tea never ends"]
+    For "Why does the Cheshire Cat say the Hatter and the March Hare are both mad?":
+    good: ["The Cat says everyone in Wonderland is mad"]; WRONG: ["The Hatter and March Hare are both mad"]
+    (that only repeats the question).
 
   OUTPUT: JSON only, no prose, no code fences:
   {
@@ -174,14 +192,27 @@ kaqg-mcq-prompt: |
   - CONTENT_TEXT: the passage. The answer MUST be in it.
   - Sometimes EDGE_FOCUS (ask about causes or consequences) or EVALUATOR_FEEDBACK (fix those problems).
 
+  WHAT TO ASK ABOUT
+  - Only the work itself: its story, characters, events, ideas and arguments.
+  - Skip prefaces, translators' or editors' introductions, footnotes, notes and commentary,
+    publication history, dedications and tables of contents. Never ask who wrote, translated,
+    edited or dated the book, or what scholars or commentators think. If CONTENT_TEXT is mostly
+    such material, ask about an idea of the work itself that it quotes or explains.
+  - In annotated editions, ask about the author's own text, not the commentators' notes or the
+    historical anecdotes told in them.
+  - Prefer important events, characters and ideas over minor details.
+  - Never ask about disclaimers, licences, copyright or website navigation.
+
   THE QUESTION
   - One sentence, at most about 20 words, ending with "?".
   - Everyday words. Use the book's own names for people, places and things.
+  - The reader never saw a passage, only the book. Never mention "the passage", "the excerpt",
+    "the text", "the author" or "the commentators"; never start with "According to ..." or
+    "In the passage, ..." and never end with "..., according to ...?".
   - Never use: analyze, critique, evaluate, assess, discuss, examine, significance, implications,
-    "in what ways", "to what extent", "according to the passage", "according to the text", "how does the author".
+    "in what ways", "to what extent", "how does the author".
   - No multi-part questions, no invented scenarios or modern-day situations, no trick wording,
     no negatives ("Which is NOT ...?").
-  - Never ask about disclaimers, licences, copyright, website navigation or the book's front/back matter.
 
   THE OPTIONS
   - Exactly 4 options, each short (a few words), similar in length and form. No letters in front.
@@ -189,7 +220,7 @@ kaqg-mcq-prompt: |
   - The 3 wrong options are plausible (other characters, places, objects or events from the same
     book, or things of the same kind) but clearly wrong according to CONTENT_TEXT.
   - No "all of the above", "none of the above", or overlapping options.
-  - Put the correct option in a random position.
+  - List the correct option FIRST and set correctAnswer to "A" (the app shuffles the options).
 
   DEPTH: difficulty changes how deep the question goes, never how fancy it sounds.
   - Remember: who / what / where. One fact.
@@ -199,19 +230,21 @@ kaqg-mcq-prompt: |
   - Analyze: how two things in the book are connected, or what led to something.
   TARGET_BLOOM_LEVEL wins over the level shown next to a concept.
 
-  EXAMPLES (Alice's Adventures in Wonderland). They all sound alike; only the depth changes.
+  EXAMPLES (Alice's Adventures in Wonderland) show the style only: never copy them, even for Alice.
+  They all sound alike; only the depth changes.
   - Gentle: "Who is always late in the first chapter?"
     The White Rabbit / The Mad Hatter / The Dormouse / The Cheshire Cat
   - Standard: "What does the Cheshire Cat leave behind when it vanishes?"
     Its grin / Its tail / Its collar / A paw print
   - Challenging: "Why is it always six o'clock at the Mad Tea-Party?"
     The Hatter quarrelled with Time / Butter got into the Hatter's watch / The Queen ordered it / The Dormouse stopped the clocks
+  (Correct option first in every example.)
 
   OUTPUT: JSON only, no prose, no code fences:
   {
     "question": "The question",
-    "options": ["option", "option", "option", "option"],
-    "correctAnswer": "A | B | C | D",
+    "options": ["correct option", "wrong option", "wrong option", "wrong option"],
+    "correctAnswer": "A",
     "targetConcept": "primary_concept_id",
     "bloomLevel": "Remember | Understand | Apply | Analyze",
     "difficulty": <number -2 to 2, your estimate on the TARGET_DIFFICULTY scale; stay close to TARGET_DIFFICULTY unless the question clearly came out easier or harder>
@@ -235,14 +268,30 @@ kaqg-tf-prompt: |
   - CONTENT_TEXT: the passage. Whether the statement is true or false MUST be clear from it.
   - Sometimes EDGE_FOCUS or EVALUATOR_FEEDBACK (fix those problems).
 
+  WHAT IT IS ABOUT
+  - An important event, character or idea of the work itself (its story, characters, ideas,
+    arguments), not a minor detail, a date or a passing remark. At gentle difficulty pick
+    something every reader of the book remembers.
+  - Skip prefaces, translators' or editors' introductions, footnotes, notes and commentary,
+    publication history, dedications and tables of contents: never who wrote, translated, edited
+    or dated the book, or what scholars or commentators think. If CONTENT_TEXT is mostly such
+    material, use an idea of the work itself that it quotes or explains.
+  - In annotated editions, use the author's own text, not the commentators' notes or the
+    historical anecdotes told in them.
+  - Never about disclaimers, licences, copyright or website navigation.
+
   THE STATEMENT
-  - One sentence, at most about 20 words, about ONE fact from CONTENT_TEXT. Everyday words, the
-    book's own names. Do not start with "True or false:" (the app adds that).
+  - ONE simple claim, at most about 15 words. Everyday words, the book's own names.
+    Do not start with "True or false:" (the app adds that).
+  - Never two facts in one statement: no "and", "while", "but", "just before", "after" or
+    "because" joining a second fact. ("X happens because Y" is fine only when the reason Y is the
+    single thing being checked.)
   - TRUE: says the fact the way the book does, in plain words.
-  - FALSE: changes one detail of a real fact (who, what, where, when or a number) so it is clearly
+  - FALSE: changes one detail of a real fact (who, what, where or why) so it is clearly
     false according to CONTENT_TEXT. Not a trick: no "not" / "never", no half-true statements, no opinions.
-  - Never use academic wording (analyze, evaluate, significance, "according to the passage" ...).
-  - Never about disclaimers, licences, copyright, website navigation or the book's front/back matter.
+  - The reader never saw a passage, only the book: never mention "the passage", "the excerpt",
+    "the text", "the author" or "the commentators", and never start with "According to ..." or
+    "In the passage, ...". No academic wording (analyze, evaluate, significance ...).
 
   DEPTH: difficulty changes how deep the statement goes, never how fancy it sounds.
   - Remember: a plain fact (who / what / where).
@@ -251,11 +300,13 @@ kaqg-tf-prompt: |
   - Analyze: how two things in the book are connected, or what led to something.
   TARGET_BLOOM_LEVEL wins over the level shown next to a concept.
 
-  EXAMPLES (Alice's Adventures in Wonderland):
+  EXAMPLES (Alice's Adventures in Wonderland) show the style only: never copy them, even for Alice.
   - Gentle, TRUE: "Alice shrinks after drinking from the bottle."
   - Gentle, FALSE: "The Mad Hatter is the one who is always late in the first chapter."
   - Standard, TRUE: "The Cheshire Cat's grin stays behind after the rest of it vanishes."
   - Challenging, FALSE: "It is always six o'clock at the tea-party because the Queen ordered it."
+  Never like this (two facts, a minor detail, too long):
+  "The Hatter says he and the March Hare quarrelled with Time last March, just before the March Hare went mad."
 
   OUTPUT: JSON only, no prose, no code fences:
   {
@@ -267,8 +318,10 @@ kaqg-tf-prompt: |
   }
 
 # --- Question check (System One, before a question is shown) ---
-# MCQ: Jev's pick ≠ key (confidence ≥ 0.6) → regenerate once; answerable_from_passage = no or
-# plainly_worded = no (confidence ≥ 0.7) → regenerate once. A failed check keeps the question.
+# MCQ / true-false: Jev's answer ≠ key (confidence ≥ 0.6) → regenerate once; answerable_from_passage, plainly_worded
+# or about_the_work (the book's own story/argument, not its introduction, translator, editions,
+# commentators or history) = no with confidence ≥ 0.7 → regenerate once (all in one Jev call).
+# A failed check keeps the question. MCQ options are shuffled in code before the check.
 question-check-model: typesafe/jev-1.13
 
 # --- Grading open answers ---

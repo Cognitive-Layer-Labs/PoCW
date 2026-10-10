@@ -140,8 +140,8 @@ every response carries its cost. MCQ / true-false answers are graded without a m
 **Jev** (`typesafe/jev-1.13`) is a "System One" decisions model, not a chat model: it is called on
 `POST https://openrouter.ai/api/alpha/decisions` with a context (`state`) and named `choice`
 questions, and answers each with a choice, probabilities and a confidence in ~0.3 s for ~$0.00002–0.00008.
-The engine uses it to check questions (is the MCQ key right? answerable from the passage? plainly
-worded? → regenerate once) and to grade open answers per key point (covered / partial / missing +
+The engine uses it to check questions (is the MCQ / true-false key right? answerable from the passage? plainly
+worded? about the work itself rather than its introduction? → regenerate once) and to grade open answers per key point (covered / partial / missing +
 an overall verdict), escalating to the LLM grader when Jev is unsure (confidence < 0.6), when its
 verdict and coverage disagree, or when the call fails. Details: [docs/OPTIONS.md §5, §7](docs/OPTIONS.md).
 

@@ -96,6 +96,105 @@ export function isTooSimilar(newQ: string, previous: string[]): boolean {
   });
 }
 
+// ─── Randomness (injectable for tests) ──────────────────────────────────────
+
+let random: () => number = Math.random;
+
+/** Tests: make MCQ shuffles and true/false targets deterministic (null → Math.random). */
+export function __setQuestionRandomForTest(fn: (() => number) | null): void {
+  random = fn ?? Math.random;
+}
+
+const LETTERS = ["A", "B", "C", "D"];
+
+/**
+ * Shuffle the 4 MCQ options (Fisher–Yates) and remap correctAnswer, so the key's position is
+ * uniformly random: models put the right answer first most of the time ("Put the correct option
+ * in a random position" in the prompt did not help). Returns `q` unchanged when it is not a
+ * well-formed MCQ.
+ */
+export function shuffleMCQOptions(q: GeneratedQuestion, rng: () => number = random): GeneratedQuestion {
+  if (q.type !== "mcq" || !q.options || q.options.length !== 4) return q;
+  const keyIdx = LETTERS.indexOf((q.correctAnswer ?? "").trim().toUpperCase());
+  if (keyIdx < 0) return q;
+  const order = [0, 1, 2, 3];
+  for (let i = order.length - 1; i > 0; i--) {
+    const j = Math.min(i, Math.floor(rng() * (i + 1)));
+    [order[i], order[j]] = [order[j], order[i]];
+  }
+  return {
+    ...q,
+    options: order.map(i => q.options![i]),
+    correctAnswer: LETTERS[order.indexOf(keyIdx)],
+  };
+}
+
+// ─── Wording clean-up and cheap style checks ────────────────────────────────
+
+/** "the passage", "this text", "the commentators' explanation", "the author" … */
+const SOURCE_REF =
+  String.raw`(?:the|this|these)\s+(?:passage|text|excerpt|extract|selection|book|author|writer|translator|commentators?|commentary|notes?)` +
+  String.raw`(?:['’]s?\s+[A-Za-z-]+|\s+(?:explanation|explanations|account|view|views|notes?|description|words|interpretation|commentary|comments?))?`;
+const LEAD_VERB = String.raw`(?:according\s+to|as\s+(?:described|stated|explained|mentioned|shown|told|noted|said|suggested)\s+(?:in|by)|based\s+on|in|from|within)`;
+const LEADING_REF = new RegExp(String.raw`^\s*(?:${LEAD_VERB}\s+${SOURCE_REF}|as\s+${SOURCE_REF}\s+(?:says|explains|describes|states|notes|suggests|puts\s+it|tells\s+us|shows))\s*[,:]\s*`, "i");
+const TRAILING_REF = new RegExp(String.raw`\s*,?\s*${LEAD_VERB}\s+${SOURCE_REF}\s*(?=[?.!]*\s*$)`, "i");
+
+/**
+ * Remove "According to this passage, …", "In the passage, …" and "…, according to the
+ * commentators' explanation?" style frames (readers never saw a passage), keeping the sentence
+ * capitalised and punctuated.
+ */
+export function cleanQuestionWording(text: string): string {
+  let s = text.replace(/\s+/g, " ").trim();
+  for (let i = 0; i < 2; i++) {
+    const before = s;
+    s = s.replace(LEADING_REF, "").replace(TRAILING_REF, "");
+    if (s === before) break;
+  }
+  s = s.replace(/\s+([?.!,])/g, "$1").trim();
+  if (!s) return text.trim();
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+/** A true/false statement must be one simple claim. */
+export const TF_MAX_WORDS = 25;
+const TF_COMPOUND = /,\s*(?:and|while|whereas|but|just\s+(?:before|after))\s|;\s/i;
+const MENTIONS_SOURCE = /\b(?:the|this|that|above|following|given)\s+(?:passage|excerpt|extract|text)\b/i;
+
+/** Cheap style problems that earn ONE regeneration (null = fine). */
+export function styleProblem(q: GeneratedQuestion): string | null {
+  if (MENTIONS_SOURCE.test(q.question)) {
+    return "It mentions \"the passage\", \"the excerpt\" or \"the text\". The reader never saw a passage, only the book: ask about the book's story or ideas directly.";
+  }
+  if (q.type === "true_false") {
+    const words = q.question.split(/\s+/).filter(Boolean).length;
+    if (words > TF_MAX_WORDS) {
+      return `It has ${words} words. Write ONE simple claim in at most 15 words.`;
+    }
+    if (TF_COMPOUND.test(q.question)) {
+      return "It joins two facts into one statement. Write ONE simple claim (at most 15 words) — no \", and\", \"while\" or \"just before\" adding a second fact.";
+    }
+  }
+  return null;
+}
+
+const significantWords = (s: string): string[] => normalizeText(s).split(" ").filter(Boolean);
+
+/**
+ * Drop key points that only restate the question (every significant word already in it), e.g.
+ * "The Hatter and March Hare are both mad" for "Why does the Cat say the Hatter and the March
+ * Hare are both mad?" — they are not part of the answer. Keeps the list when nothing else is left.
+ */
+export function dropRestatedKeyPoints(question: string, keyPoints: string[] | undefined): string[] | undefined {
+  if (!keyPoints || keyPoints.length === 0) return keyPoints;
+  const qWords = new Set(significantWords(question).map(w => w.replace(/s$/, "")));
+  const answers = keyPoints.filter(kp => {
+    const kw = significantWords(kp).map(w => w.replace(/s$/, ""));
+    return kw.length === 0 || !kw.every(w => qWords.has(w));
+  });
+  return answers.length > 0 ? answers : keyPoints;
+}
+
 // ─── Context builders ────────────────────────────────────────────────────────
 
 function formatSubgraph(nodes: KGNode[], edges: KGEdge[]): string {
@@ -229,11 +328,12 @@ function parseOpenPayload(payload: string, fallbackDiff: number, fallbackBloom: 
       keyPoints:         kpItems.length > 0 ? kpItems : undefined,
     };
   }
-  const keyPoints = strings(parsed.keyPoints) ?? strings(parsed.referenceKeyPoints);
+  const question = cleanQuestionWording(String(parsed.question || ""));
+  const keyPoints = dropRestatedKeyPoints(question, strings(parsed.keyPoints) ?? strings(parsed.referenceKeyPoints));
   const modelAnswer = typeof parsed.modelAnswer === "string" && parsed.modelAnswer.trim()
     ? parsed.modelAnswer.trim() : undefined;
   return {
-    question: String(parsed.question || "").trim(),
+    question,
     targetConcept: String(parsed.targetConcept || "unknown"),
     bloomLevel: capBloomLevel((parsed.bloomLevel as string) || fallbackBloom),
     difficulty: typeof parsed.difficulty === "number" ? parsed.difficulty : fallbackDiff,
@@ -249,9 +349,9 @@ function parseMCQPayload(payload: string, fallbackDiff: number, fallbackBloom: s
   const options = Array.isArray(parsed.options) ? parsed.options.map((s: unknown) => stripPrefix(String(s))) : [];
   if (options.length !== 4) throw new Error("MCQ must have exactly 4 options");
   const correctAnswer = String(parsed.correctAnswer || "A").toUpperCase();
-  if (!["A", "B", "C", "D"].includes(correctAnswer)) throw new Error("Invalid correctAnswer");
+  if (!LETTERS.includes(correctAnswer)) throw new Error("Invalid correctAnswer");
   return {
-    question: String(parsed.question || "").trim(),
+    question: cleanQuestionWording(String(parsed.question || "")),
     targetConcept: String(parsed.targetConcept || "unknown"),
     bloomLevel: capBloomLevel(parsed.bloomLevel || fallbackBloom),
     difficulty: typeof parsed.difficulty === "number" ? parsed.difficulty : fallbackDiff,
@@ -267,7 +367,7 @@ function parseTFPayload(payload: string, fallbackDiff: number, fallbackBloom: st
     ? String(parsed.correctAnswer)
     : String(parsed.correctAnswer || "true").toLowerCase();
   return {
-    question: String(parsed.statement || parsed.question || "").trim(),
+    question: cleanQuestionWording(String(parsed.statement || parsed.question || "")),
     targetConcept: String(parsed.targetConcept || "unknown"),
     bloomLevel: capBloomLevel(parsed.bloomLevel || fallbackBloom),
     difficulty: typeof parsed.difficulty === "number" ? parsed.difficulty : fallbackDiff,
@@ -333,12 +433,21 @@ export class QuestionGenerationAgent {
     const { contentId, contentText, targetDifficulty, previousQuestions, qType, opts, evaluatorFeedback, targetConceptId, edgeDirection } = params;
 
     const ctx = await buildContext(contentId, targetDifficulty, previousQuestions, targetConceptId, edgeDirection);
-    const tfTarget = qType === "true_false" ? Math.random() < 0.5 : undefined;
+    const tfTarget = qType === "true_false" ? random() < 0.5 : undefined;
 
     // Questions rejected as near-duplicates of PREVIOUS_QUESTIONS. Named in the retry prompt: some
     // models ignore temperature (e.g. Claude Haiku 5.5 via OpenRouter), so a hotter retry alone
     // would just repeat the same question.
     const duplicates: string[] = [];
+    // Cheap style check (styleProblem): ONE rewrite with a note; the rewrite is kept as it is.
+    let styleRejected: GeneratedQuestion | null = null;
+    let styleNote: string | null = null;
+
+    // Every returned question goes through here: grader context + MCQ options shuffled in code.
+    const finalize = (q: GeneratedQuestion): GeneratedQuestion => {
+      if (ctx.conceptContext) q.conceptContext = ctx.conceptContext;
+      return shuffleMCQOptions(q);
+    };
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       const temperature = 0.3 + attempt * 0.25;
@@ -349,6 +458,9 @@ export class QuestionGenerationAgent {
       if (duplicates.length > 0) {
         userMsg += `\n\nREJECTED_AS_DUPLICATE (too close to a previous question — ask about a different fact, person or event from CONTENT_TEXT):\n` +
           duplicates.map(q => `- ${q}`).join("\n");
+      }
+      if (styleRejected && styleNote) {
+        userMsg += `\n\nREWRITE_NEEDED (the previous attempt was rejected): "${styleRejected.question}"\n- ${styleNote}`;
       }
 
       let result: GeneratedQuestion;
@@ -362,18 +474,26 @@ export class QuestionGenerationAgent {
       const validation = validateFormat(result, ctx.degraded);
       if (!validation.ok) {
         console.warn(`[question-generation-agent] Format validation failed: ${validation.reason}`);
-        if (attempt === MAX_RETRIES) return result;
+        if (attempt === MAX_RETRIES) return finalize(styleRejected ?? result);
+        continue;
+      }
+
+      const problem = styleProblem(result);
+      if (problem && !styleRejected && attempt < MAX_RETRIES) {
+        console.warn(`[question-generation-agent] ${qType} rewritten once: ${problem} ("${result.question}")`);
+        styleRejected = result;
+        styleNote = problem;
         continue;
       }
 
       if (attempt === MAX_RETRIES || !isTooSimilar(result.question, previousQuestions)) {
-        // Attach concept context for the grader
-        if (ctx.conceptContext) result.conceptContext = ctx.conceptContext;
-        return result;
+        return finalize(result);
       }
       duplicates.push(result.question);
     }
 
+    // The style rewrite failed (unparseable / duplicates): the rejected question is still usable.
+    if (styleRejected) return finalize(styleRejected);
     throw new QuestionGenerationError(`Failed to generate a unique ${qType} question after ${MAX_RETRIES} retries`);
   }
 

@@ -8,6 +8,7 @@ import {
   __resetQuestionCheckStatsForTest,
 } from "../src/services/question-check";
 import { generateQuestion } from "../src/services/question-generator";
+import { __setQuestionRandomForTest } from "../src/services/question-generation-agent";
 import { __setGetConceptsByDifficultyForTest } from "../src/services/kg-store";
 import { attachUsageStore, __usageDbForTest } from "../src/services/usage-store";
 import type { GeneratedQuestion } from "../src/services/question-generation-agent";
@@ -26,9 +27,9 @@ const choice = (c: string, confidence = 0.95) => ({ type: "choice" as const, cho
 
 describe("Question check (Jev, before a question is shown)", () => {
   describe("request + rules", () => {
-    it("MCQ: asks which option is correct (criteria = the 4 options) plus answerable / plainly worded", () => {
+    it("MCQ: asks which option is correct (criteria = the 4 options) plus answerable / plainly worded / about the work", () => {
       const req = buildQuestionCheckRequest("typesafe/jev-1.13", mcq, "passage text");
-      expect(Object.keys(req.questions)).to.deep.equal(["correct_option", "answerable_from_passage", "plainly_worded"]);
+      expect(Object.keys(req.questions)).to.deep.equal(["correct_option", "answerable_from_passage", "plainly_worded", "about_the_work"]);
       expect((req.questions.correct_option as any).criteria).to.deep.equal({ A: "Its grin", B: "Its tail", C: "Its collar", D: "A paw print" });
       expect(req.questions.correct_option.instructions).to.equal("Which option is correct according to the passage?");
       expect((req.questions.answerable_from_passage as any).criteria).to.have.keys("yes", "no");
@@ -38,7 +39,7 @@ describe("Question check (Jev, before a question is shown)", () => {
 
     it("open / true-false: no option question; the statement is sent as a statement", () => {
       const open = buildQuestionCheckRequest("m", { ...mcq, type: "open", options: undefined, correctAnswer: undefined }, "p");
-      expect(Object.keys(open.questions)).to.deep.equal(["answerable_from_passage", "plainly_worded"]);
+      expect(Object.keys(open.questions)).to.deep.equal(["answerable_from_passage", "plainly_worded", "about_the_work"]);
       const tf = buildQuestionCheckRequest("m", { ...mcq, type: "true_false", question: "Alice shrinks.", options: undefined, correctAnswer: "true" }, "p");
       expect(tf.state).to.include({ statement: "Alice shrinks." });
       expect(tf.state).to.not.have.property("question");
@@ -68,12 +69,15 @@ describe("Question check (Jev, before a question is shown)", () => {
       db = new Database(":memory:");
       attachUsageStore(db);
       __resetQuestionCheckStatsForTest();
+      // Options keep the generated order here (an RNG near 1 makes the Fisher–Yates shuffle the identity).
+      __setQuestionRandomForTest(() => 0.999999);
       __setGetConceptsByDifficultyForTest(async () => ({
         concepts: [{ id: "cheshire_cat", label: "Cheshire Cat", bloomLevel: "Understand", importance: 8 }],
         subgraph: { nodes: [], edges: [] },
       }));
     });
     afterEach(() => {
+      __setQuestionRandomForTest(null);
       restoreDecisions();
       restoreChat();
       attachUsageStore(null);
@@ -92,7 +96,7 @@ describe("Question check (Jev, before a question is shown)", () => {
 
     it("passes a good question through (one generation, one check)", async () => {
       const chat = stubChat((_c, n) => generated(n + 1));
-      const dec = stubDecisions(() => decisionsBody({ correct_option: ["A", 0.9], answerable_from_passage: ["yes", 0.9], plainly_worded: ["yes", 0.9] }));
+      const dec = stubDecisions(() => decisionsBody({ correct_option: ["A", 0.9], answerable_from_passage: ["yes", 0.9], plainly_worded: ["yes", 0.9], about_the_work: ["yes", 0.9] }));
       const q = await generateQuestion(1, "passage", 0, [], "mcq");
       expect(q.question).to.equal("What does the Cheshire Cat leave behind when it vanishes?");
       expect(chat).to.have.length(1);
@@ -104,7 +108,7 @@ describe("Question check (Jev, before a question is shown)", () => {
 
     it("regenerates ONCE with feedback when flagged, and keeps the new question without re-checking", async () => {
       const chat = stubChat((_c, n) => generated(n));
-      const dec = stubDecisions(() => decisionsBody({ correct_option: ["A", 0.9], answerable_from_passage: ["yes", 0.9], plainly_worded: ["no", 0.95] }));
+      const dec = stubDecisions(() => decisionsBody({ correct_option: ["A", 0.9], answerable_from_passage: ["yes", 0.9], plainly_worded: ["no", 0.95], about_the_work: ["yes", 0.9] }));
       const q = await generateQuestion(1, "passage", 0, [], "mcq");
       expect(chat).to.have.length(2);
       expect(dec).to.have.length(1); // never loops
@@ -119,10 +123,10 @@ describe("Question check (Jev, before a question is shown)", () => {
 
     it("an MCQ whose key looks wrong is regenerated with the option Jev picked in the feedback", async () => {
       const chat = stubChat((_c, n) => (n === 1 ? generated(2) : { ...generated(2), question: "Where does Alice first meet the Cheshire Cat?" }));
-      stubDecisions(() => decisionsBody({ correct_option: ["C", 0.8], answerable_from_passage: ["yes", 0.9], plainly_worded: ["yes", 0.9] }));
+      stubDecisions(() => decisionsBody({ correct_option: ["C", 0.8], answerable_from_passage: ["yes", 0.9], plainly_worded: ["yes", 0.9], about_the_work: ["yes", 0.9] }));
       await generateQuestion(1, "passage", 0, [], "mcq");
       expect(chat).to.have.length(2);
-      expect(chat[1].user).to.contain('option C ("Its collar"), not A');
+      expect(chat[1].user).to.contain('the passage seems to support "Its collar", not "Its grin"');
     });
 
     it("keeps the question when the check errors", async () => {
@@ -136,7 +140,7 @@ describe("Question check (Jev, before a question is shown)", () => {
 
     it("keeps the original question when the regeneration fails", async () => {
       const chat = stubChat((_c, n) => (n === 1 ? generated(1) : "<<not json>>"));
-      stubDecisions(() => decisionsBody({ correct_option: ["A", 0.9], answerable_from_passage: ["no", 0.9], plainly_worded: ["yes", 0.9] }));
+      stubDecisions(() => decisionsBody({ correct_option: ["A", 0.9], answerable_from_passage: ["no", 0.9], plainly_worded: ["yes", 0.9], about_the_work: ["yes", 0.9] }));
       const q = await generateQuestion(1, "passage", 0, [], "mcq");
       expect(chat.length).to.be.greaterThan(1);
       expect(q.question).to.contain("epistemological");

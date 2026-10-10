@@ -67,8 +67,9 @@ describe("Question Types", () => {
       });
       const q = await generateQuestion(1, "content", 0, [], "mcq");
       expect(q.type).to.equal("mcq");
-      expect(q.options).to.have.length(4);
-      expect(q.correctAnswer).to.equal("B");
+      expect(q.options).to.have.members(["Opt A", "Opt B", "Opt C", "Opt D"]);
+      // Options are shuffled in code; the key follows the model's correct option.
+      expect(q.options![["A", "B", "C", "D"].indexOf(q.correctAnswer!)]).to.equal("Opt B");
     });
 
     it("dispatches 'true_false' to generateTrueFalse", async () => {
@@ -111,8 +112,8 @@ describe("Question Types", () => {
 
       const q = await generateMCQ(1, "Geography content", -1.5, []);
       expect(q.type).to.equal("mcq");
-      expect(q.options).to.deep.equal(["London", "Paris", "Berlin", "Madrid"]);
-      expect(q.correctAnswer).to.equal("B");
+      expect(q.options).to.have.members(["London", "Paris", "Berlin", "Madrid"]);
+      expect(q.options![["A", "B", "C", "D"].indexOf(q.correctAnswer!)]).to.equal("Paris");
     });
 
     it("throws on invalid MCQ (less than 4 options)", async () => {

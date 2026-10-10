@@ -7,7 +7,7 @@ import {
 } from "../src/services/kg-store";
 import * as llmClient from "../src/services/llm-client";
 import { createHash } from "crypto";
-import { VerifySession, pickQuestionType, rankQuestionTypes } from "../src/sdk/verify-session";
+import { VerifySession, pickQuestionType, rankQuestionTypes, planQuestionTypes } from "../src/sdk/verify-session";
 import { resolveConfig, PoCWError, QuestionType, VerifyQuestion, PoCWConfig } from "../src/sdk/types";
 import { QuestionGenerationError } from "../src/services/question-generator";
 
@@ -186,7 +186,7 @@ describe("VerifySession", () => {
     expect(q.type).to.equal("mcq");
     expect(q.options).to.have.length(4);
 
-    const fb = await session.submitAnswer("B");
+    const fb = await session.submitAnswer(answerFor(q)); // "Opt B", wherever the shuffle put it
     expect(fb.correct).to.be.true;
     expect(fb.score).to.equal(100);
     expect(fb.isComplete).to.be.true;
@@ -419,7 +419,11 @@ function stubRoles(opts: { failTypes?: GenKind[]; rating?: number } = {}): LLMCa
 }
 
 function answerFor(q: VerifyQuestion, correct = true): string {
-  if (q.type === "mcq") return correct ? "B" : "A";
+  // The stub's correct option is "Opt B"; options are shuffled in code, so look its letter up.
+  if (q.type === "mcq") {
+    const i = q.options!.indexOf("Opt B");
+    return "ABCD"[correct ? i : (i + 1) % 4];
+  }
   if (q.type === "true_false") return correct ? "true" : "false";
   return "an answer";
 }
@@ -575,6 +579,63 @@ describe("VerifySession — fixed length, allowed types, difficulty", () => {
         .to.deep.equal(["mcq", "mcq", "open"]);
     });
 
+    it("planQuestionTypes: difficulty first, never three of a kind in a row, every allowed type in sessions of ≥ 4", () => {
+      const TF = "true_false", MCQ = "mcq", OPEN = "open";
+      expect(planQuestionTypes(-1, ALL, [], 5)).to.deep.equal([TF, MCQ, OPEN]);
+      expect(planQuestionTypes(-1, ALL, [TF], 5)[0]).to.equal(TF);
+      // third in a row → next-closest allowed type to the target
+      expect(planQuestionTypes(-1, ALL, [TF, TF], 5)).to.deep.equal([MCQ, TF, OPEN]);
+      expect(planQuestionTypes(1.5, ALL, [OPEN, OPEN], 5)[0]).to.equal(MCQ);
+      expect(planQuestionTypes(-1, ALL, [TF, TF, MCQ], 5)[0]).to.equal(TF);
+      // last slot, open never used → open
+      expect(planQuestionTypes(-1, ALL, [TF, TF, MCQ, TF], 5)).to.deep.equal([OPEN, TF, MCQ]);
+      // two slots left, two unused types → the closer unused one now
+      expect(planQuestionTypes(-1, ALL, [TF, TF, TF], 5)[0]).to.equal(MCQ);
+      // short sessions (< 4) only get the run rule
+      expect(planQuestionTypes(-1, ALL, [TF, MCQ], 3)[0]).to.equal(TF);
+      expect(planQuestionTypes(-1, ALL, [TF, TF], 3)[0]).to.equal(MCQ);
+      // a single allowed type is kept, whatever the history
+      expect(planQuestionTypes(-1, [TF], [TF, TF, TF], 5)).to.deep.equal([TF]);
+      // always a permutation of the allowed types
+      for (const allowed of subsets) {
+        for (const asked of [[], [TF, TF], [MCQ, MCQ, OPEN], [OPEN, OPEN, OPEN, OPEN]] as QuestionType[][]) {
+          for (let b = -2; b <= 2.0001; b += 0.25) {
+            expect([...planQuestionTypes(b, allowed, asked, 6)].sort()).to.deep.equal([...allowed].sort());
+          }
+        }
+      }
+    });
+
+    it("mixed sessions vary the type (easy / hard / max, 5 questions) and survive Redis snapshots identically", async () => {
+      const runs = (types: QuestionType[]) => {
+        for (let i = 2; i < types.length; i++) {
+          expect(types[i] === types[i - 1] && types[i] === types[i - 2], types.join(",")).to.be.false;
+        }
+      };
+      for (const difficulty of [0.2, 0.65, 1]) {
+        const play = async (viaSnapshots: boolean) => {
+          stubRoles();
+          let session = new VerifySession(1, "kid1", chunks, "user1", resolveConfig({ max_questions: 5, difficulty, q_types: ALL }));
+          await session.init();
+          const types: QuestionType[] = [];
+          while (!session.isComplete()) {
+            if (viaSnapshots) {
+              session = VerifySession.fromSnapshot(JSON.parse(JSON.stringify(session.toSnapshot())));
+              session.rehydrateChunks(chunks);
+            }
+            types.push(session.currentQuestion.type);
+            await session.submitAnswer(answerFor(session.currentQuestion));
+          }
+          return types;
+        };
+        const direct = await play(false);
+        expect(direct, `difficulty ${difficulty}`).to.have.length(5);
+        expect(new Set(direct), `difficulty ${difficulty}: ${direct}`).to.have.property("size", 3);
+        runs(direct);
+        expect(await play(true)).to.deep.equal(direct);
+      }
+    });
+
     it("sessions only ever request and ask allowed types, at every difficulty", async () => {
       for (const allowed of subsets) {
         for (const difficulty of [0, 0.2, 0.4, 0.65, 1]) {
@@ -624,6 +685,25 @@ describe("VerifySession — fixed length, allowed types, difficulty", () => {
       }
       expect(generationKinds(calls)).to.not.include("open");
     });
+  });
+
+  it("question passages skip a book's front matter (contents, introduction) when the book has other text", async () => {
+    const calls = stubRoles();
+    const filler = (w: string) => `${w} `.repeat(700);
+    const book = [
+      "Contents\nINTRODUCTION\nChapter I. Laying plans\nChapter II. Waging War\n" + filler("INTRO_TEXT"),
+      ...Array.from({ length: 3 }, () => filler("INTRO_TEXT")),
+      "Chapter I. LAYING PLANS\nSun Tzŭ said: The art of war is of vital importance to the State. " + filler("BODY_TEXT"),
+      ...Array.from({ length: 7 }, () => filler("BODY_TEXT")),
+    ];
+    const session = new VerifySession(1, "kid1", book, "user1", resolveConfig({ max_questions: 6, q_types: ["mcq", "true_false"] }));
+    await session.init();
+    while (!session.isComplete()) await session.submitAnswer(answerFor(session.currentQuestion));
+    const passages = generationKinds(calls).length;
+    expect(passages).to.equal(6);
+    for (const c of calls.filter(c => c.kind !== "grade" && c.kind !== "eval")) {
+      expect(c.user).to.contain("BODY_TEXT").and.not.contain("INTRO_TEXT");
+    }
   });
 
   describe("difficulty setting", () => {
