@@ -220,9 +220,35 @@ in Redis, refreshed on every answer.
 }
 ```
 
-Open questions return `dimensions: { covered_points, total_points, precision_cap }` and
-`referenceKeyPoints: string[]` instead of `correctAnswer`. When `isComplete` is `true`,
-`nextQuestion` is absent — fetch the result.
+Open questions return, instead of `correctAnswer`:
+
+```json
+{
+  "correct": true,
+  "score": 83,
+  "reasoning": "You covered 2 of 3 key points, and 1 more partly.",
+  "keyPoints": [
+    { "point": "The Hatter quarrelled with Time", "status": "covered" },
+    { "point": "Since then Time keeps it at six o'clock", "status": "covered" },
+    { "point": "Six o'clock is tea-time, so tea never ends", "status": "partial" }
+  ],
+  "modelAnswer": "The Hatter quarrelled with Time, so Time stopped at six o'clock. It is always tea-time now.",
+  "gradedBy": "jev",
+  "referenceKeyPoints": ["The Hatter quarrelled with Time", "…", "…"],
+  "dimensions": { "covered_points": 2.5, "total_points": 3, "precision_cap": 100 }
+}
+```
+
+- `keyPoints` — each reference key point with `"covered" | "partial" | "missing"`.
+- `modelAnswer` — a short complete answer (1–3 sentences) written with the question.
+- `gradedBy` — `"jev"` (decisions model) or `"llm"` (LLM grader / escalation); for admin/debug.
+- `reasoning` — a short sentence derived from `keyPoints`.
+- Score: `round(100 × Σ(covered 1, partial ½) / n)`, capped at 40 when the overall verdict is
+  "wrong"; `correct` = score ≥ 70 (see [OPTIONS.md §7](OPTIONS.md#7-open-question-grading-jev--llm-escalation)).
+
+All three new fields are optional (absent for MCQ / true-false, and `keyPoints` is absent when a
+legacy grader prompt is configured). When `isComplete` is `true`, `nextQuestion` is absent — fetch
+the result.
 
 Errors: `404` `SESSION_EXPIRED` (unknown/expired session), `409` `SESSION_NOT_ACTIVE` (already
 complete), `409` `SESSION_BUSY` (another answer for this session is still being graded — one at a
@@ -294,6 +320,46 @@ when FalkorDB is unavailable.
 ```
 
 `importance` is normalised to [0, 1].
+
+---
+
+### `GET /api/usage`
+
+Operator endpoint: model spend from the engine's call log (every chat and decisions call is
+recorded with the model that actually answered, tokens, `usage.cost`, latency, ok/error and the
+resource / session it belongs to; kept 90 days). `Authorization: Bearer <POCW_API_KEY>` like every
+`/api` route — call it **server-to-server only**, never proxy it to browsers.
+
+Query: `days` (1–90, default 30) — the last `days` UTC calendar days including today.
+
+```json
+{
+  "days": 30,
+  "key": { "limitUsd": 6, "usageUsd": 1.32, "remainingUsd": 4.68 },
+  "totals": { "calls": 1240, "costUsd": 0.8123, "errors": 3 },
+  "byDay": [{ "date": "2026-10-10", "calls": 120, "costUsd": 0.071 }],
+  "byTask": [
+    { "task": "kg", "model": "anthropic/claude-haiku-5.5", "calls": 300, "costUsd": 0.31, "avgLatencyMs": 6900, "errors": 1 },
+    { "task": "grade", "model": "typesafe/jev-1.13-20260917", "calls": 210, "costUsd": 0.011, "avgLatencyMs": 320, "errors": 0 }
+  ],
+  "perBook": { "avgCostUsd": 0.021, "count": 14 },
+  "perSession": { "avgCostUsd": 0.0068, "count": 37 },
+  "quality": {
+    "questionCheck": { "checked": 400, "passed": 371, "regenerated": 29, "reasons": { "not_plain": 18, "key_mismatch": 7, "not_answerable": 6 } },
+    "grading": { "jev": 160, "escalated": 50, "reasons": { "low_confidence": 41, "disagreement": 6, "jev_error": 3 } }
+  }
+}
+```
+
+- `key` — live from OpenRouter `GET /api/v1/auth/key` (cached ~60 s); `limitUsd` / `remainingUsd`
+  are `null` for an unlimited key; `key` is `null` when the lookup fails.
+- `byDay` has one entry per day (zeros included), oldest first.
+- `byTask` groups by `task` (`kg`, `question`, `question_check`, `grade`, `grade_escalation`,
+  `title`, …) and the model that answered (fallbacks show up as their own rows), most expensive first.
+- `perBook` — indexing cost per resource (calls tied to a resource outside any test session).
+- `perSession` — generation + checking + grading cost per **finished** test session.
+- `quality` (extra) — outcomes of the decisions-model steps: how often the question check passed
+  or forced a regeneration (and why), and how often Jev's grade stood vs. was escalated (and why).
 
 ---
 
@@ -393,8 +459,9 @@ interface PoCWConfig {
 - **`difficulty`** sets the centre of the item-difficulty band: offset `2.5 × (difficulty − 0.55)`
   on the IRT scale, target = offset + small importance nudge + ½ θ. Easy 0.2 → −0.875 (Remember/
   Understand, true/false + MCQ), medium 0.4 → −0.375 (Understand/Apply; a strong learner stays at or
-  below Analyze in a 5-question test), hard 0.65 → +0.25 (Apply/Analyze, Evaluate only after
-  several correct answers); default 0.5 → −0.125. The learner's ability θ moves the target up or
+  below Analyze in a 5-question test), hard 0.65 → +0.25 (Apply/Analyze); default 0.5 → −0.125.
+  Question targets are capped at **Analyze** (no Evaluate/Create questions): difficulty changes the
+  depth of a question, not its wording. The learner's ability θ moves the target up or
   down by at most ±1 around that centre. See [OPTIONS.md §2](OPTIONS.md#2-concept-mastery-loop).
 - **`q_types`**: with several types, the type follows the item's target difficulty among the
   allowed types only (true/false for easier items, then MCQ, then open). If generating the
@@ -407,7 +474,7 @@ interface VerifyQuestion {
   text: string;
   number: number;           // 1-based
   type: "open" | "mcq" | "true_false";
-  bloomLevel: string;       // Remember … Create
+  bloomLevel: string;       // Remember | Understand | Apply | Analyze
   difficulty: number;       // IRT b, [−2, 2]: LLM rating anchored to the item's target (±0.25)
   totalQuestions: number;   // exact number of questions in the session (= maxQuestions)
   options?: string[];       // mcq only (4 items)
@@ -420,10 +487,13 @@ interface VerifyQuestion {
 interface AnswerFeedback {
   correct: boolean;
   score: number;                                   // 0–100
-  reasoning: string;
+  reasoning: string;                               // open: derived from keyPoints
   dimensions?: { covered_points: number; total_points: number; precision_cap: number }; // open
   irtParams?: { a: number; b: number; c: number; d: number; importance: number; theta_before: number };
   referenceKeyPoints?: string[];                   // open
+  keyPoints?: Array<{ point: string; status: "covered" | "partial" | "missing" }>; // open
+  modelAnswer?: string;                            // open: 1–3 sentence answer
+  gradedBy?: "jev" | "llm";                        // open: which grader decided
   correctAnswer?: string;                          // mcq / true_false
   progress: { questionNumber: number; theta: number; se: number; bloomLevel: string };
   isComplete: boolean;

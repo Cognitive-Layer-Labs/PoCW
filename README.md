@@ -2,8 +2,9 @@
 
 PoCW measures whether someone actually understood a piece of content. It ingests a source
 (web page, whole book as PDF / EPUB / TXT / Markdown, or YouTube video), extracts a **knowledge graph** with an LLM, and then
-runs an **adaptive test**: questions are generated from the graph, free-text answers are graded by an
-LLM against reference claims, and a **4PL Item Response Theory** model estimates the learner's ability.
+runs an **adaptive test**: questions are generated from the graph (and checked before they are
+shown), free-text answers are graded key point by key point, and a **4PL Item Response Theory**
+model estimates the learner's ability.
 
 The engine is a plain HTTP service (Node.js + TypeScript) backed by FalkorDB, Redis and SQLite.
 
@@ -16,8 +17,8 @@ The engine is a plain HTTP service (Node.js + TypeScript) backed by FalkorDB, Re
   POST /api/index   │  parser ─▶ chunker ─▶ kg-builder (LLM) ─▶ kg-store ──────────────┐     │
   POST /api/upload  │  (SSRF-safe fetch, PDF, EPUB, HTML, YouTube)             FalkorDB │     │
                     │                                                                   ▼     │
-  POST /api/verify  │  verify session ─▶ question generation (LLM, KG-grounded)               │
-  .../answer        │        │            ─▶ grading (claims for open, exact for MCQ/TF)      │
+  POST /api/verify  │  verify session ─▶ question generation (LLM, KG-grounded) + Jev check   │
+  .../answer        │        │            ─▶ grading (Jev key points ▸ LLM; exact MCQ/TF)     │
   .../result        │        └─▶ irt-engine (4PL MAP θ, SE, concept-mastery loop)             │
                     │  content-store (SQLite: status, title, author)  session-store (Redis)   │
                     └──────────────────────────────────────────────────────────────────────────┘
@@ -28,7 +29,9 @@ The engine is a plain HTTP service (Node.js + TypeScript) backed by FalkorDB, Re
 | `src/services/parser.ts`, `safe-fetch.ts` | URL / upload / PDF / HTML / YouTube text extraction; every fetch is SSRF-guarded |
 | `src/services/epub.ts`, `zip-reader.ts`, `book-text.ts` | EPUB parsing (hardened ZIP reader), Project Gutenberg stripping, title/author detection, text limits |
 | `src/services/kg-builder.ts`, `kg-store.ts` | LLM knowledge-graph extraction (sampled across the whole text, merged across chunks); storage and queries in FalkorDB |
-| `src/services/question-*.ts` | Question generation + quality check, answer grading |
+| `src/services/question-*.ts`, `answer-grading.ts` | Question generation + question check (Jev), answer grading (Jev + LLM escalation) |
+| `src/services/ai-config.ts`, `llm-client.ts`, `decisions-client.ts` | Models/prompts (`AI_CONFIG_PATH`), OpenRouter chat calls (fallbacks, reasoning, cost), OpenRouter decisions API (Jev) |
+| `src/services/usage-store.ts` | Call log in SQLite (model, tokens, cost, latency per call; 90 days) behind `GET /api/usage` |
 | `src/services/irt-engine.ts` | 4PL IRT, MAP ability estimation, concept-mastery item selection |
 | `src/sdk/` | `PoCW` SDK class (`index`, `verify`, admin ops), `VerifySession`, SQLite content store |
 | `src/app.ts`, `src/server.ts` | HTTP API, auth, rate limiting, startup |
@@ -107,6 +110,7 @@ unreachable it starts in degraded mode (no graph extraction) and keeps retrying 
 | `ADMIN_API_KEY` | — | Bearer token for `/api/admin/*`. Unset ⇒ admin API returns 403 |
 | `TRUST_PROXY` | off | Express `trust proxy`: hop count (`1`), `true`, or an address list |
 | `ALLOW_MODEL_OVERRIDE` | off | `true` lets HTTP callers pick the LLM via `config.model`; otherwise it is ignored |
+| `AI_CONFIG_PATH` | `ai-config.yml` | Models + prompts file (absolute, or relative to the working directory / project root). `ai-config.baseline.yml` = the pre-2026-10-10 setup |
 | `CORS_ORIGIN` | — | Only needed if browsers call the engine directly |
 | `PORT` | `3000` | HTTP port |
 | `POCW_DB_PATH` | `./data/pocw.db` | SQLite content index |
@@ -114,7 +118,47 @@ unreachable it starts in degraded mode (no graph extraction) and keeps retrying 
 | `REDIS_URL` | `redis://localhost:6379/1` | Session store |
 | `ENGINE_PORT`, `REDIS_PASSWORD`, `FALKORDB_MAXMEMORY`, `*_MEM_LIMIT` | see `.env.example` | docker-compose only |
 
-LLM models and prompts live in [`ai-config.yml`](ai-config.yml).
+### Models (`ai-config.yml`)
+
+All calls go through OpenRouter (`OPENROUTER_API_KEY`). Models and prompts live in
+[`ai-config.yml`](ai-config.yml) (or the file named by `AI_CONFIG_PATH`); the engine validates the
+file at startup and logs which one it loaded.
+
+| Task | Model | Reasoning | Fallback |
+|---|---|---|---|
+| Knowledge-graph extraction (`kg`) | `anthropic/claude-haiku-5.5` | low | `google/gemini-2.5-flash` |
+| Question generation — open / MCQ / true-false (`question`) | `anthropic/claude-haiku-5.5` | off | `google/gemini-2.5-flash` |
+| Question check, before a question is shown (`question_check`) | `typesafe/jev-1.13` (decisions API) | — | keep the question |
+| Grading open answers (`grade`) | `typesafe/jev-1.13` (decisions API) | — | escalation ↓ |
+| Grade escalation — Jev unsure / inconsistent / failed (`grade_escalation`) | `openai/gpt-6-luna` | low | `google/gemini-2.5-flash` |
+| Titles of web pages / videos (`title`) | `openai/gpt-5-nano` | minimal (cannot be turned off) | fallback title from the page |
+
+Requests send `"models": [primary, ...fallbacks]` (OpenRouter tries them in order),
+`"reasoning": { "effort": … }` / `{ "enabled": false }`, and `"usage": { "include": true }` so
+every response carries its cost. MCQ / true-false answers are graded without a model.
+
+**Jev** (`typesafe/jev-1.13`) is a "System One" decisions model, not a chat model: it is called on
+`POST https://openrouter.ai/api/alpha/decisions` with a context (`state`) and named `choice`
+questions, and answers each with a choice, probabilities and a confidence in ~0.3 s for ~$0.00002–0.00008.
+The engine uses it to check questions (is the MCQ key right? answerable from the passage? plainly
+worded? → regenerate once) and to grade open answers per key point (covered / partial / missing +
+an overall verdict), escalating to the LLM grader when Jev is unsure (confidence < 0.6), when its
+verdict and coverage disagree, or when the call fails. Details: [docs/OPTIONS.md §5, §7](docs/OPTIONS.md).
+
+**Baseline / A-B.** [`ai-config.baseline.yml`](ai-config.baseline.yml) keeps the models and prompts
+used before 2026-10-10 (all `google/gemini-2.5-flash`, no Jev, LLM-only grading). Roll back with
+`cp ai-config.baseline.yml ai-config.yml`, or run a second engine with
+`AI_CONFIG_PATH=ai-config.baseline.yml` to compare. (Code-level changes — the Analyze cap on Bloom
+targets, the 50/50 true/false target and the cost log — apply to both.)
+
+**Cost.** Every chat and decisions call is logged in the engine's SQLite database (task, model that
+actually answered, tokens, `usage.cost`, latency, ok/error, resource / session; 90 days).
+`GET /api/usage?days=30` (bearer `POCW_API_KEY`, server-to-server only) returns totals, per-day,
+per-task/model, per indexed book and per finished test session, plus the live key balance.
+A live smoke run (one Alice in Wonderland passage) cost ≈ $0.001 for one KG chunk (Haiku 5.5,
+~7 s), ≈ $0.0003–0.0004 per generated question (~1.5 s) plus ≈ $0.00005 for its Jev check (~0.3 s),
+≈ $0.00007 per Jev grade (~0.3 s), ≈ $0.0002 per GPT-6 Luna escalation (~2–3 s) and ≈ $0.00005 per
+title (gpt-5-nano, ~1 s).
 
 ---
 
@@ -131,9 +175,10 @@ requests/min per client IP; index-status polling has its own 120/min budget.
 | `GET` | `/api/index/:knowledgeId` | Indexing status (`202` + `Retry-After` while pending/indexing), `title`, optional `author` |
 | `PATCH` | `/api/index/:knowledgeId/title` | Re-derive or set a title |
 | `POST` | `/api/verify` | `{ knowledgeId, subject?, config? }` → start a session, first question |
-| `POST` | `/api/verify/:sessionId/answer` | `{ answer }` → feedback (+ `nextQuestion`) |
+| `POST` | `/api/verify/:sessionId/answer` | `{ answer }` → feedback (+ `nextQuestion`); open answers add `keyPoints`, `modelAnswer`, `gradedBy` |
 | `GET` | `/api/verify/:sessionId/result` | Final result (θ, score, `concepts[]`, profile, disclaimers) |
 | `GET` | `/api/graph/:knowledgeId` | Knowledge graph `{ contentId, nodes, edges }` |
+| `GET` | `/api/usage?days=30` | Model spend: live key balance, totals, by day, by task/model, per book, per session (operator, server-to-server only) |
 | `GET`/`PATCH`/`DELETE`/`POST` | `/api/admin/...` | List (incl. hidden), visibility, delete, reindex, wipe — `Bearer $ADMIN_API_KEY` |
 | `GET` | `/health` | Liveness (no auth) |
 
@@ -156,7 +201,7 @@ Details, shapes and error codes: [docs/API.md](docs/API.md).
 ## Tests
 
 ```bash
-npm test          # mocha + tsx; no FalkorDB/Redis/network needed (LLM, DNS and HTTP are stubbed)
+npm test          # mocha + tsx; no FalkorDB/Redis/network needed (LLM, decisions API, DNS and HTTP are stubbed)
 npm run typecheck
 npm run build
 ```
@@ -170,6 +215,7 @@ src/            engine source (app.ts, server.ts, sdk/, services/)
 tests/          mocha tests
 public/         explore.html developer UI
 docs/           API.md, OPTIONS.md
-ai-config.yml   LLM models and prompts
+ai-config.yml            models and prompts (AI_CONFIG_PATH selects another file)
+ai-config.baseline.yml   models and prompts before 2026-10-10 (all gemini-2.5-flash) — rollback / A-B
 Dockerfile, docker-compose.yml, .env.example
 ```

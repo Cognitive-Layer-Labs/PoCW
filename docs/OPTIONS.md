@@ -78,7 +78,7 @@ offset   = 2.5 × (difficulty − 0.55)                                    (conf
 | 0.20 (easy) | −0.875 | −0.83 … −0.73: Understand, true/false | stays Understand (true/false, then MCQ) | Remember |
 | 0.40 (medium) | −0.375 | −0.33 … −0.23: Understand, MCQ | Understand → Apply; never past Analyze within 5 questions | Understand → Remember |
 | 0.50 (default) | −0.125 | −0.08 … +0.03: Understand/Apply, MCQ | Apply → Analyze | Understand → Remember |
-| 0.65 (hard) | +0.25 | +0.30 … +0.40: Apply, MCQ | Apply → Analyze → Evaluate from question 3–4; no Create | Apply → Understand |
+| 0.65 (hard) | +0.25 | +0.30 … +0.40: Apply, MCQ | Apply → Analyze (open questions from question 3–4; Bloom targets are capped at Analyze, §5) | Apply → Understand |
 
 (Simulated with the 4PL update and an LLM rating anchored to ±0.25 — both an LLM that rates every
 item 1.0 and one that rates at the target; see `tests/irt-engine.test.ts`.)
@@ -89,7 +89,8 @@ Why θ enters at half weight: for an all-correct learner θ ≈ hardest item + u
 the target converges: the difficulty setting fixes the centre of the band and θ moves the target
 at most ±1 around it, up for strong learners and down for struggling ones. The importance term
 (formerly × 1.5, always positive for important concepts) is now a small nudge. The maximum target
-at θ = 2 is `offset + 1.15`, so Create (≥ 1.5) is only reachable at difficulty ≳ 0.7.
+at θ = 2 is `offset + 1.15`. (Targets above b = 0.5 are Analyze-level questions: Bloom targets
+stop at Analyze, see §5.)
 
 **Edge direction rotation on re-ask:**
 Each concept has a graph with incoming and outgoing edges. Re-asks use a different slice of that graph to generate a different question:
@@ -179,18 +180,36 @@ difficulty is mapped to a suggested Bloom level) and is reported in the result p
 (`bloomCoverage`, `bloomLevelsReached`). It does **not** weight the ability estimate.
 
 ```
-target difficulty b → suggested Bloom:
-  < −1.0 → Remember
-  <  0.0 → Understand
-  <  0.5 → Apply
-  <  1.0 → Analyze
-  <  1.5 → Evaluate
-  ≥  1.5 → Create
+target difficulty b → suggested Bloom (question target):
+  < −1.0 → Remember     who / what / where — one fact
+  <  0.0 → Understand   why something happens, what something means
+  <  0.5 → Apply        what would X do / what would happen if … (a situation the book sets up)
+  ≥  0.5 → Analyze      how two things are connected, what led to something
 ```
 
+Targets are **capped at Analyze** (`bloomTargetFor` / `MAX_TARGET_BLOOM` in `irt-engine.ts`):
+Evaluate/Create targets produced academic, convoluted questions, so anything above maps to
+Analyze, and a Bloom level above Analyze returned by the LLM is stored as Analyze.
+(`difficultyToBloom` still has the full six-level mapping; the KG keeps all six levels for concepts.)
+
 The question-generation LLM assigns the final Bloom level of each question (it may differ from the suggestion).
-`config.difficulty` shifts the target difficulty and therefore the suggested Bloom level (§2). The
-generation prompts ask for plain, direct, single-fact questions at Remember/Understand.
+`config.difficulty` shifts the target difficulty and therefore the suggested Bloom level (§2).
+
+**Question style.** The generation prompts (`ai-config.yml`) ask for questions that read like a
+friend who read the book asking about it: one sentence of at most ~20 words, everyday words, one
+clear answer that is in the passage; no jargon ("analyze", "evaluate the significance", "to what
+extent", "according to the passage"…), no multi-part questions, no invented scenarios. Difficulty
+changes the depth (the patterns above), never the phrasing. MCQ: 4 short options of similar length,
+exactly one correct per the text. True/false: one simple fact; the engine picks the target answer
+(true/false) at random for each statement so about half are false.
+
+**Question check (decisions model, `question-check-model`).** Before a question is shown, one Jev
+call asks: for MCQ, which option is correct according to the passage (criteria = the 4 options);
+for every type, `answerable_from_passage` (yes/no) and `plainly_worded` (yes/no). If Jev picks a
+different MCQ option than the key with confidence ≥ 0.6, or answers "no" to either yes/no question
+with confidence ≥ 0.7, the question is regenerated **once** with that feedback (the regenerated
+question is used as is). A failed check, or a failed regeneration, keeps the original question.
+Outcomes are stored on the call-log row and summarised in `GET /api/usage` (`quality.questionCheck`).
 
 ---
 
@@ -219,35 +238,48 @@ Set `q_types: ["mcq"]` (single type) to always use MCQ regardless of difficulty.
 
 ---
 
-## 7. Open Question Grading (Claim Verification)
+## 7. Open Question Grading (Jev + LLM escalation)
 
-Open answers are graded by an LLM using **claim coverage**, not holistic scoring:
+Open answers are graded **key point by key point**. Each open question is generated with a
+`modelAnswer` (1–3 plain sentences) and 1–4 short, checkable `keyPoints` (2–4 normally; a
+one-fact question gets 1–2 so a correct short answer is never penalised for "missing" padding).
+
+**System One — Jev (`grade-decisions-model`, OpenRouter decisions API).** One call per answer:
 
 ```
-STEP 1 — CLAIM COVERAGE
-  For each reference key point:
-    covered_points += 1 if the student's answer correctly addresses it
-  base_score = round(covered_points / total_points × 100)
+state     = { question, key_points, source_passage, student_answer (fenced), security_note }
+questions = kp_1 … kp_n : choice { covered | partial | missing }
+            verdict     : choice { correct | partial | wrong }
 
-STEP 2 — CONCEPTUAL PRECISION GATE
-  Does the student correctly invoke the TARGET_CONCEPT?
-    Never / incorrectly → precision_cap = 40
-    Mentioned with errors → precision_cap = 60
-    Correctly used → precision_cap = 100
-
-  final_score = min(base_score, precision_cap)
-
-STEP 3 — VERDICT
-  correct = final_score ≥ 70
+coverage = Σ(covered = 1, partial = ½) / n
+score    = round(100 × coverage), capped at 40 when verdict = wrong
+correct  = score ≥ 70
 ```
 
-`referenceKeyPoints` are generated by the KAQG LLM at question-generation time (3–6 specific facts the answer must cover).
+**Escalation → LLM grader (`grade-model`, GPT-6 Luna, reasoning low)** when:
+- any key-point or verdict confidence < 0.6 (`low_confidence`);
+- verdict and coverage disagree: verdict correct but coverage < 0.5, or verdict wrong but
+  coverage > 0.7 (`disagreement`);
+- the Jev call fails, times out (10 s, one retry) or returns an unusable answer (`jev_error`);
+- the question has no key points (`no_key_points`).
 
-**Anti-bias rules baked into the grader prompt:**
-- A longer answer is NOT automatically better.
-- A confident tone does NOT raise the score.
-- Restating the question without substance: covered_points = 0.
-- The student answer arrives between security markers and is treated as untrusted input (prompt injection guard).
+The LLM grader returns the same per-key-point statuses + verdict and is scored with the same
+formula. If the escalation itself fails, Jev's grade is used — a Jev or escalation failure never
+fails the learner's request on its own. Without `grade-decisions-model` (e.g. the baseline config)
+the LLM grader grades every answer; its legacy `covered_points / total_points / precision_cap`
+format is still understood.
+
+The answer feedback carries `keyPoints` (statuses), `modelAnswer`, `gradedBy` (`jev` | `llm`) and a
+`reasoning` sentence derived from the key points ("You covered 2 of 3 key points.").
+
+**Prompt-injection guard.** The student answer is untrusted: it is fenced between
+`---STUDENT_ANSWER_START---` / `---STUDENT_ANSWER_END---` (marker look-alikes inside it are
+replaced), and every Jev instruction and the LLM grader prompt say to ignore instructions inside it.
+
+**Anti-bias rules** (both graders): meaning over wording or length; a confident tone or extra words
+never raise the grade; restating the question or "I don't know" is wrong.
+
+MCQ and true/false answers are graded deterministically (exact match, no model call).
 
 ---
 
