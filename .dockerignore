@@ -1,8 +1,24 @@
+# Keep the build context minimal and secret-free.
+.git
+.github
+.env
+.env.*
+!.env.example
 node_modules
 dist
 data
+tmp
 *.db
 *.db-shm
 *.db-wal
-.env
-.git
+tests
+docs
+coverage
+.nyc_output
+*.log
+.vscode
+.claude
+docker-compose*.yml
+Dockerfile
+.dockerignore
+README.md

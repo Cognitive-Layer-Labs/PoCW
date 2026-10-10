@@ -139,11 +139,20 @@
   <!-- ── Sidebar ── -->
   <div class="sidebar">
 
+    <!-- API key (only needed when the engine has POCW_API_KEY set) -->
+    <div class="panel-section">
+      <h2>API Key</h2>
+      <label>Bearer token (POCW_API_KEY) — kept in this tab only</label>
+      <div class="row">
+        <input type="password" id="api-key" placeholder="leave empty if the engine runs without a key" autocomplete="off" />
+      </div>
+    </div>
+
     <!-- Step 1: Index -->
     <div class="panel-section">
       <h2>1 · Index Content</h2>
 
-      <label>URL (HTTP/HTTPS/IPFS)</label>
+      <label>URL (HTTP/HTTPS)</label>
       <div class="row">
         <input type="url" id="url-input" placeholder="https://en.wikipedia.org/wiki/..." />
       </div>
@@ -268,6 +277,22 @@ const BLOOM_COLORS = {
 
 let state = { knowledgeId: null, contentId: null, questions: [], network: null };
 
+// ── API key (sessionStorage, this tab only) ───────────────────────────────────
+const apiKeyInput = document.getElementById("api-key");
+try { apiKeyInput.value = sessionStorage.getItem("pocw-api-key") || ""; } catch (_) {}
+apiKeyInput.addEventListener("input", () => {
+  try { sessionStorage.setItem("pocw-api-key", apiKeyInput.value.trim()); } catch (_) {}
+});
+function authHeaders() {
+  const k = apiKeyInput.value.trim();
+  return k ? { Authorization: `Bearer ${k}` } : {};
+}
+
+// Escape untrusted text (LLM output, content-derived labels, server errors) before innerHTML.
+function esc(v) {
+  return String(v ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
 // ── Legend ────────────────────────────────────────────────────────────────────
 document.getElementById("legend").innerHTML =
   Object.entries(BLOOM_COLORS).map(([lv, c]) =>
@@ -295,7 +320,7 @@ function setGenStatus(state, msg) {
 }
 
 async function api(method, path, body, isFormData) {
-  const opts = { method, headers: {} };
+  const opts = { method, headers: { ...authHeaders() } };
   if (body && !isFormData) { opts.headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(body); }
   else if (body && isFormData) { opts.body = body; }
   const r = await fetch(path, opts);
@@ -308,7 +333,7 @@ async function poll(knowledgeId) {
   for (let i = 0; i < 120; i++) {
     const s = await api("GET", `/api/index/${knowledgeId}`);
     if (s.status === "ready") return s;
-    if (s.status === "error") throw new Error(s.error || "Indexing failed");
+    if (s.status === "failed") throw new Error(s.error || "Indexing failed");
     setIndexStatus("loading", `Indexing… (${i * 2}s)`);
     await new Promise(r => setTimeout(r, 2000));
   }
@@ -331,7 +356,7 @@ async function doIndex() {
     if (file) {
       const ct = file.name.endsWith(".pdf") ? "application/pdf" : "text/plain";
       const buf = await file.arrayBuffer();
-      const r = await fetch("/api/upload", { method: "POST", headers: { "Content-Type": ct }, body: buf });
+      const r = await fetch("/api/upload", { method: "POST", headers: { "Content-Type": ct, ...authHeaders() }, body: buf });
       result = await r.json();
       if (!r.ok) throw new Error(result.error || r.statusText);
     } else {
@@ -413,10 +438,10 @@ async function loadGraph() {
       if (!n) return;
       const m = n._meta;
       const c = BLOOM_COLORS[m.bloomLevel] || BLOOM_COLORS.Understand;
-      info.innerHTML = `<div style="font-weight:600;color:${c.dot};margin-bottom:6px">${m.label}</div>
-        <div style="color:#94a3b8">Bloom: <b style="color:${c.fg}">${m.bloomLevel}</b></div>
+      info.innerHTML = `<div style="font-weight:600;color:${c.dot};margin-bottom:6px">${esc(m.label)}</div>
+        <div style="color:#94a3b8">Bloom: <b style="color:${c.fg}">${esc(m.bloomLevel)}</b></div>
         <div style="color:#94a3b8">Importance: <b>${(m.importance * 100).toFixed(0)}%</b></div>
-        <div style="color:#475569;font-size:10px;margin-top:4px">${m.id}</div>`;
+        <div style="color:#475569;font-size:10px;margin-top:4px">${esc(m.id)}</div>`;
       info.style.display = "block";
     });
 
@@ -501,7 +526,7 @@ async function doGenerate() {
 
   } catch (e) {
     setGenStatus("err", e.message);
-    list.innerHTML += `<div class="q-spinner" style="color:#ef4444">${e.message}</div>`;
+    list.innerHTML += `<div class="q-spinner" style="color:#ef4444">${esc(e.message)}</div>`;
   } finally {
     btn.disabled = false;
   }
@@ -515,7 +540,7 @@ function appendQuestion(list, q) {
   if (q.type === "mcq" && q.options?.length) {
     optionsHTML = `<div class="q-options">${q.options.map((o, i) => {
       const lbl = String.fromCharCode(65 + i);
-      return `<div class="q-option">${lbl}) ${o}</div>`;
+      return `<div class="q-option">${lbl}) ${esc(o)}</div>`;
     }).join("")}</div>`;
   } else if (q.type === "true_false") {
     optionsHTML = `<div class="q-options">
@@ -529,11 +554,11 @@ function appendQuestion(list, q) {
   div.innerHTML = `
     <div class="q-card-header">
       <span class="q-num">#${q.number}</span>
-      <span class="bloom-badge" style="background:${bc.bg};color:${bc.fg}">${q.bloomLevel}</span>
-      <span class="type-badge">${q.type}</span>
+      <span class="bloom-badge" style="background:${bc.bg};color:${bc.fg}">${esc(q.bloomLevel)}</span>
+      <span class="type-badge">${esc(q.type)}</span>
       <span class="diff-badge">${diffLabel}</span>
     </div>
-    <div class="q-text">${q.text}</div>
+    <div class="q-text">${esc(q.text)}</div>
     ${optionsHTML}
   `;
   list.appendChild(div);
@@ -569,7 +594,7 @@ async function openGraphModal() {
     try {
       cachedGraph = await api("GET", `/api/graph/${state.contentId}`);
     } catch (e) {
-      container.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#ef4444;font-size:13px">${e.message}</div>`;
+      container.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#ef4444;font-size:13px">${esc(e.message)}</div>`;
       return;
     }
   }
@@ -659,7 +684,7 @@ async function openGraphModal() {
     if (!n) return;
     const m = n._meta;
     const c = BLOOM_COLORS[m.bloomLevel] || BLOOM_COLORS.Understand;
-    infoEl.innerHTML = `<b style="color:${c.dot}">${m.label}</b> &nbsp;·&nbsp; ${m.bloomLevel} &nbsp;·&nbsp; importance <b>${(m.importance * 100).toFixed(0)}%</b> &nbsp;·&nbsp; ${m.degree} edge${m.degree !== 1 ? "s" : ""}`;
+    infoEl.innerHTML = `<b style="color:${c.dot}">${esc(m.label)}</b> &nbsp;·&nbsp; ${esc(m.bloomLevel)} &nbsp;·&nbsp; importance <b>${(m.importance * 100).toFixed(0)}%</b> &nbsp;·&nbsp; ${m.degree} edge${m.degree !== 1 ? "s" : ""}`;
   });
 
   // Legend
@@ -707,7 +732,7 @@ function renderStats(graph, degree) {
     const pct = Math.round(n.importance * 100);
     return `<div class="node-rank-item">
       <span class="node-rank-num">${i + 1}</span>
-      <span class="node-rank-label" style="color:${c.fg}" title="${n.label}">${n.label}</span>
+      <span class="node-rank-label" style="color:${c.fg}" title="${esc(n.label)}">${esc(n.label)}</span>
       <span style="font-size:10px;color:${c.dot};margin-left:auto;white-space:nowrap">${pct}% · ${deg}e</span>
     </div>`;
   }).join("");

@@ -8,22 +8,20 @@ node_modules/
 .env.test
 .env.production
 
-# Build artifacts
-cache/
-artifacts/
+# Build output
 dist/
-oracle-service/dist/
-typechain-types/
+coverage/
 
-# Hardhat / Foundry
-deployments/localhost.json
-
-# Oracle data (SQLite, session profiles)
+# Runtime data (SQLite content index, fallback DB)
 data/
-oracle-service/data/
+tmp/
+*.db
+*.db-shm
+*.db-wal
 
 # Logs
 .logs/
+*.log
 
 # OS
 .DS_Store
