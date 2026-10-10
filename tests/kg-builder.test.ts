@@ -46,7 +46,7 @@ describe("KG Builder", () => {
       expect(graph.nodes[0].bloomLevel).to.equal("Understand");
     });
 
-    it("clamps importance to [1, 10]", () => {
+    it("normalizes importance into [0, 1] preserving the LLM ranking", () => {
       const payload = JSON.stringify({
         nodes: [
           { id: "a", label: "A", bloomLevel: "Remember", importance: 0 },
@@ -56,8 +56,10 @@ describe("KG Builder", () => {
       });
 
       const graph = parseKGPayload(1, payload);
-      expect(graph.nodes[0].importance).to.equal(1);
-      expect(graph.nodes[1].importance).to.equal(10);
+      const [a, b] = graph.nodes;
+      expect(a.importance).to.be.within(0, 1);
+      expect(b.importance).to.be.within(0, 1);
+      expect(b.importance).to.be.greaterThan(a.importance);
     });
 
     it("filters edges with invalid node references", () => {

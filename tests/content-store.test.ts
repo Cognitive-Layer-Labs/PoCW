@@ -1,7 +1,12 @@
 import { expect } from "chai";
 import Database from "better-sqlite3";
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
 import {
   __setDbForTest,
+  initContentStore,
+  closeContentStore,
   getContent,
   insertContent,
   markIndexing,
@@ -26,6 +31,8 @@ describe("Content Store (SQLite)", () => {
         knowledge_id  TEXT PRIMARY KEY,
         content_type  TEXT NOT NULL,
         source        TEXT NOT NULL,
+        title         TEXT,
+        description   TEXT,
         status        TEXT NOT NULL DEFAULT 'pending',
         error         TEXT,
         content_id    INTEGER,
@@ -162,5 +169,57 @@ describe("Content Store (SQLite)", () => {
       expect(count).to.equal(2);
       expect(listContent({ includeHidden: true }).total).to.equal(0);
     });
+  });
+});
+
+describe("Content Store — legacy databases", () => {
+  it("opens a DB created by an older version (extra access-tier columns) and hides them", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pocw-legacy-"));
+    const file = path.join(dir, "legacy.db");
+    const legacy = new Database(file);
+    legacy.exec(`
+      CREATE TABLE content_index (
+        knowledge_id TEXT PRIMARY KEY, content_type TEXT NOT NULL, source TEXT NOT NULL,
+        title TEXT, description TEXT, status TEXT NOT NULL DEFAULT 'pending', error TEXT,
+        content_id INTEGER, content_hash TEXT, chunk_count INTEGER DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')), indexed_at TEXT,
+        usage_count INTEGER DEFAULT 0, last_used_at TEXT,
+        tier TEXT DEFAULT 'free', kal_price INTEGER, unlock_rule TEXT, hidden INTEGER DEFAULT 0
+      );
+      INSERT INTO content_index (knowledge_id, content_type, source, status, tier, kal_price)
+      VALUES ('old1', 'url', 'https://old.example', 'ready', 'paid', 5);
+    `);
+    legacy.close();
+
+    __setDbForTest(null);
+    try {
+      initContentStore(file);
+      const row = getContent("old1") as unknown as Record<string, unknown>;
+      expect(row.status).to.equal("ready");
+      expect(row).to.not.have.property("tier");
+      expect(row).to.not.have.property("kal_price");
+      expect(row).to.not.have.property("unlock_rule");
+      expect(listContent().rows.map(r => r.knowledge_id)).to.include("old1");
+    } finally {
+      closeContentStore();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("creates new DBs without access-tier columns", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pocw-new-"));
+    const file = path.join(dir, "new.db");
+    __setDbForTest(null);
+    try {
+      initContentStore(file);
+      closeContentStore();
+      const db = new Database(file, { readonly: true });
+      const cols = (db.prepare("PRAGMA table_info(content_index)").all() as Array<{ name: string }>).map(c => c.name);
+      db.close();
+      expect(cols).to.include("hidden");
+      expect(cols).to.not.include.members(["tier", "kal_price", "unlock_rule"]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

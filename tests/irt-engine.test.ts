@@ -1,7 +1,8 @@
 import { expect } from "chai";
 import {
   createIRTState,
-  updateAbility,
+  updateAbility as updateAbility4PL,
+  IRTState,
   selectNextDifficulty,
   isConverged,
   probability,
@@ -11,7 +12,12 @@ import {
   IRT_CORRECT_THRESHOLD
 } from "../src/services/irt-engine";
 
-describe("IRT Engine (1PL Rasch)", () => {
+/** 4PL update with a=1, c=0, d=1 — reduces to the Rasch model these expectations are written for. */
+function updateAbility(state: IRTState, b: number, correct: boolean, score: number, bloom: string): IRTState {
+  return updateAbility4PL(state, b, 1, 0, 1, correct, score, bloom);
+}
+
+describe("IRT Engine (4PL, Rasch-equivalent params)", () => {
   describe("probability()", () => {
     it("returns 0.5 when θ equals difficulty", () => {
       expect(probability(0, 0)).to.equal(0.5);
@@ -209,25 +215,24 @@ describe("IRT Engine (1PL Rasch)", () => {
   });
 
   describe("probability() numerical stability", () => {
-    it("returns near 1 for extreme positive z without NaN", () => {
+    it("saturates to the upper asymptote d for extreme positive z without NaN", () => {
       const p = probability(600, 0);
-      expect(p).to.be.greaterThan(0.99);
-      expect(p).to.be.lessThan(1);
       expect(Number.isFinite(p)).to.be.true;
+      expect(p).to.equal(1);
+      expect(probability(600, 0, 1, 0.25, 0.95)).to.equal(0.95);
     });
 
-    it("returns near 0 for extreme negative z without NaN", () => {
+    it("saturates to the lower asymptote c for extreme negative z without NaN", () => {
       const p = probability(-600, 0);
-      expect(p).to.be.greaterThan(0);
-      expect(p).to.be.lessThan(0.01);
       expect(Number.isFinite(p)).to.be.true;
+      expect(p).to.equal(0);
+      expect(probability(-600, 0, 1, 0.25, 1)).to.equal(0.25);
     });
 
-    it("never returns exact 0 or 1 (Fisher Info stays positive)", () => {
-      const p1 = probability(1000, 0);
-      const p2 = probability(-1000, 0);
-      expect(p1 * (1 - p1)).to.be.greaterThan(0);
-      expect(p2 * (1 - p2)).to.be.greaterThan(0);
+    it("stays strictly inside (c, d) for moderate z", () => {
+      const p = probability(3, 0, 1.5, 0.2, 0.98);
+      expect(p).to.be.greaterThan(0.2);
+      expect(p).to.be.lessThan(0.98);
     });
   });
 

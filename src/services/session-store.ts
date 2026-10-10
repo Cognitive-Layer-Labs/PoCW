@@ -1,7 +1,7 @@
 /**
  * Redis-backed session store.
  *
- * Replaces the in-process Map so sessions survive oracle restarts.
+ * Persists verify sessions so they survive engine restarts.
  * TTL = 30 min (matches SESSION_TTL_MS in app.ts).
  */
 

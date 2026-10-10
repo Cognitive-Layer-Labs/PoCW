@@ -8,12 +8,6 @@ export type QuestionType = "open" | "mcq" | "true_false";
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
-export interface ChainConfig {
-  controllerAddress: string;
-  sbtAddress: string;
-  rpc?: string;
-}
-
 export interface PoCWConfig {
   /** Maximum questions before session ends. Default: 10 */
   max_questions?: number;
@@ -34,10 +28,6 @@ export interface PoCWConfig {
   response?: "boolean" | "score" | "detailed";
   /** Override LLM model (OpenRouter model ID) */
   model?: string;
-  /** Attestation mode. Default: "none" */
-  attest?: "onchain" | "offchain" | "none";
-  /** Chain config for on-chain attestation */
-  chain?: ChainConfig;
   /** Question language. Default: auto-detect from content */
   language?: string;
   /** Persona framing for questions (e.g. "explain to a 5-year-old") */
@@ -47,14 +37,13 @@ export interface PoCWConfig {
 }
 
 export const DEFAULT_CONFIG: Required<
-  Pick<PoCWConfig, "max_questions" | "difficulty" | "q_types" | "threshold" | "response" | "attest">
+  Pick<PoCWConfig, "max_questions" | "difficulty" | "q_types" | "threshold" | "response">
 > = {
   max_questions: 10,
   difficulty: 0.5,
   q_types: ["open", "mcq", "true_false"],
   threshold: 0.7,
   response: "score",
-  attest: "none",
 };
 
 /** Internal resolved config with defaults applied */
@@ -68,8 +57,6 @@ export interface ResolvedConfig {
   importance_threshold: number;
   response: "boolean" | "score" | "detailed";
   model?: string;
-  attest: "onchain" | "offchain" | "none";
-  chain?: ChainConfig;
   language?: string;
   persona?: string;
 }
@@ -98,8 +85,6 @@ export function resolveConfig(config?: PoCWConfig): ResolvedConfig {
     importance_threshold: preset?.importance_threshold ?? 0.65,
     response: config?.response ?? DEFAULT_CONFIG.response,
     model: config?.model,
-    attest: config?.attest ?? DEFAULT_CONFIG.attest,
-    chain: config?.chain,
     language: config?.language,
     persona: config?.persona,
   };
@@ -145,12 +130,6 @@ export interface ContentRow {
   indexed_at: string | null;
   usage_count: number;
   last_used_at: string | null;
-  /** Access tier: 'free' | 'paid' | 'unlocked'. Default 'free'. */
-  tier: "free" | "paid" | "unlocked" | null;
-  /** KAL tokens required to access (paid tier only). */
-  kal_price: number | null;
-  /** JSON-encoded UnlockRule (unlocked tier only). */
-  unlock_rule: string | null;
   /** 1 = hidden from the public catalog (admin toggle); 0/NULL = visible. */
   hidden: number | null;
 }
@@ -211,49 +190,41 @@ export interface ScoreBreakdown {
   difficulty: number;
   bloomLevel: string;
   correct: boolean;
+  /** KG concept the question targeted, or null when it could not be tied to a known concept. */
+  conceptId: string | null;
 }
 
-// ─── Attestation ─────────────────────────────────────────────────────────────
+// ─── Per-concept outcome ─────────────────────────────────────────────────────
 
-export interface OnchainAttestation {
-  type: "onchain";
-  signature: string;
-  contentId: number;
-  score: number;
-  /** KAL reward in wei (18-dec, decimal string) — part of the signed payload, minted by the controller */
-  kalAmount: string;
-  oracle: string;
-  controllerAddress: string;
-  sbtAddress: string;
-  /** Replay protection: unique bytes32 nonce (0x-prefixed hex) included in the signed payload */
-  nonce: string;
-  /** Replay protection: Unix timestamp (seconds) after which signature is invalid */
-  expiry: number;
-  /** Base64 data URI (data:application/json;base64,...) stored on-chain as the token URI */
-  tokenUri: string;
-  /** SHA-256 hex digest of the metadata JSON */
-  contentHash: string;
+export interface ConceptOutcome {
+  /** KG node id */
+  id: string;
+  /** KG node label */
+  label: string;
+  /** Number of questions that targeted this concept */
+  asked: number;
+  /** Number of those answered correctly */
+  correct: number;
+  /** True when the concept-mastery loop marked the concept as mastered */
+  mastered: boolean;
 }
 
-export interface OffchainAttestation {
-  type: "offchain";
-  signature: string;
-  contentId: number;
-  score: number;
-  /** KAL reward in wei (18-dec, decimal string) — part of the signed payload */
-  kalAmount: string;
-  oracle: string;
-  /** Replay protection: unique bytes32 nonce (0x-prefixed hex) included in the signed payload */
-  nonce: string;
-  /** Replay protection: Unix timestamp (seconds) after which signature is invalid */
-  expiry: number;
-  /** Base64 data URI (data:application/json;base64,...) stored on-chain as the token URI */
-  tokenUri: string;
-  /** SHA-256 hex digest of the metadata JSON */
-  contentHash: string;
-}
+// ─── Cognitive profile (descriptive session summary) ─────────────────────────
 
-export type AttestationResult = OnchainAttestation | OffchainAttestation;
+export interface CognitiveProfile {
+  /** Content title (from the content index) */
+  title: string;
+  /** Original source (URL or raw-text marker) */
+  source: string;
+  /** Distinct Bloom levels of correctly answered questions */
+  bloomLevelsReached: string[];
+  /** Number of questions asked per Bloom level */
+  bloomCoverage: Record<string, number>;
+  /** Person-fit flag: response pattern is potentially aberrant */
+  aberrant: boolean;
+  /** Distinct question types used in the session */
+  questionTypes: QuestionType[];
+}
 
 // ─── Final Result ────────────────────────────────────────────────────────────
 
@@ -285,18 +256,14 @@ export interface PoCWResult {
   confidence_interval: [number, number];
   questions_asked: number;
   response_detail?: ScoreBreakdown[];
-  attestation?: AttestationResult;
+  /** Per-concept outcomes for the important concepts tracked by the session. Always present. */
+  concepts: ConceptOutcome[];
+  /** Descriptive summary of the session (Bloom coverage, question types, person-fit). */
+  profile: CognitiveProfile;
   knowledgeId: string;
   contentId: number;
   subject: string;
   timestamp: string;
-  /** Base64 data URI of the ERC-1155 metadata (present when attestation type is onchain/offchain) */
-  tokenUri?: string;
-  /**
-   * KAL tokens earned for this session (in token units, e.g. 73.5).
-   * Only present when the session passed. Multiply by 1e18 for wei when calling KAL.mint.
-   */
-  kalAmount?: number;
   /** Disclaimer text explaining the heuristic nature of the measurements */
   disclaimers: PoCWDisclaimers;
 }
@@ -320,7 +287,6 @@ export type PoCWErrorCode =
   | "INVALID_CONFIG"
   | "LLM_ERROR"
   | "GRAPH_DB_ERROR"
-  | "ATTESTATION_ERROR"
   | "CAPACITY_EXCEEDED";
 
 export class PoCWError extends Error {

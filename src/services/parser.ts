@@ -1,7 +1,6 @@
 import pdfParse from "pdf-parse";
 import { JSDOM } from "jsdom";
-import * as fs from "fs";
-import { fileURLToPath } from "url";
+import { safeFetch } from "./safe-fetch";
 
 /**
  * Parse content from a URL into plain text.
@@ -11,27 +10,12 @@ import { fileURLToPath } from "url";
  * - Markdown (.md / .markdown)
  * - HTML
  * - YouTube transcript (HTTP transcript sources)
- * Transport:
- * - http / https
- * - ipfs
- * - youtube transcript only
+ * Transport: http / https only. Every fetch of a user-supplied URL goes through
+ * safeFetch (SSRF protection: private/internal targets and redirects to them are blocked).
  *
  * WS6: Errors propagate to the caller — no silent fallbacks.
  */
 export async function parseContentToText(url: string): Promise<string> {
-  // Local file support via file:// URLs
-  if (url.startsWith("file://")) {
-    const filePath = fileURLToPath(url);
-    const buffer = fs.readFileSync(filePath);
-    if (url.endsWith(".pdf") || isPDF("application/pdf", url)) {
-      const parsePdf = pdfParse as unknown as (data: Buffer) => Promise<{ text: string }>;
-      const pdf = await parsePdf(buffer);
-      if (!pdf.text.trim()) throw new Error("No text found in PDF — it may be image-only");
-      return truncate(cleanText(pdf.text));
-    }
-    return truncate(cleanText(buffer.toString("utf8")));
-  }
-
   const validationError = validateSourceUrl(url);
   if (validationError) {
     throw new Error(validationError);
@@ -41,14 +25,7 @@ export async function parseContentToText(url: string): Promise<string> {
     return await parseYouTube(url);
   }
 
-  if (isIPFS(url)) {
-    url = normalizeIPFS(url);
-  }
-
-  // 3.5 — SSRF protection: block private/internal IP ranges
-  blockPrivateIp(url);
-
-  const res = await fetch(url);
+  const res = await safeFetch(url);
 
   if (!res.ok) {
     throw new Error(`Failed to fetch content: ${url} (HTTP ${res.status})`);
@@ -93,7 +70,7 @@ export async function parseContentToText(url: string): Promise<string> {
  * Only call this when you need the title; use parseContentToText otherwise.
  */
 export async function parseWebContentWithTitle(url: string): Promise<{ text: string; htmlTitle: string | null }> {
-  if (url.startsWith("file://") || isYouTube(url) || isIPFS(url)) {
+  if (isYouTube(url)) {
     const text = await parseContentToText(url);
     return { text, htmlTitle: null };
   }
@@ -102,9 +79,7 @@ export async function parseWebContentWithTitle(url: string): Promise<{ text: str
   const validationError = validateSourceUrl(url);
   if (validationError) throw new Error(validationError);
 
-  blockPrivateIp(url);
-
-  const res = await fetch(url);
+  const res = await safeFetch(url);
   if (!res.ok) throw new Error(`Failed to fetch: ${url} (HTTP ${res.status})`);
 
   const contentType = (res.headers.get("content-type") || "").toLowerCase();
@@ -124,49 +99,10 @@ export async function parseWebContentWithTitle(url: string): Promise<{ text: str
 
 /* ================= validation ================= */
 
-/**
- * 3.5 — SSRF protection.
- * Throws if the URL resolves to a private/internal IP range.
- * Only called for http/https URLs (not IPFS, not raw text).
- */
-function blockPrivateIp(rawUrl: string): void {
-  let hostname: string;
-  try {
-    hostname = new URL(rawUrl).hostname.toLowerCase();
-  } catch {
-    return; // not a parseable URL — other validation will catch it
-  }
-
-  const privateRanges = [
-    /^127\./,               // loopback
-    /^10\./,               // RFC 1918 class A
-    /^172\.(1[6-9]|2\d|3[01])\./, // RFC 1918 class B
-    /^192\.168\./,         // RFC 1918 class C
-    /^169\.254\./,         // link-local / cloud metadata
-    /^::1$/,               // IPv6 loopback
-    /^fc00:/,              // IPv6 unique local
-    /^fe80:/,              // IPv6 link-local
-    /^0\./,                // 0.0.0.0/8
-    /^localhost$/,
-  ];
-
-  if (privateRanges.some(r => r.test(hostname))) {
-    throw new Error(`SSRF blocked: private/internal URL not allowed — ${rawUrl}`);
-  }
-}
-
 function validateSourceUrl(value: string): string | null {
   const trimmed = value.trim();
   if (!trimmed) {
     return `Invalid URL: ${value}`;
-  }
-
-  if (trimmed.startsWith("ipfs://")) {
-    const remainder = trimmed.slice("ipfs://".length).trim();
-    if (!remainder || remainder.startsWith("/") || /\s/.test(remainder)) {
-      return "Invalid IPFS URL. Use ipfs://<CID>[/path]";
-    }
-    return null;
   }
 
   let parsed: URL;
@@ -177,7 +113,7 @@ function validateSourceUrl(value: string): string | null {
   }
 
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    return `Unsupported URL protocol: ${parsed.protocol}. Use http://, https://, or ipfs://`;
+    return `Unsupported URL protocol: ${parsed.protocol}. Use http:// or https://`;
   }
 
   if (!parsed.hostname) {
@@ -221,15 +157,7 @@ function isBinary(contentType: string): boolean {
 /* ================= helpers ================= */
 
 function isYouTube(url: string): boolean {
-  return url.includes("youtube.com") || url.includes("youtu.be");
-}
-
-function isIPFS(url: string): boolean {
-  return url.startsWith("ipfs://");
-}
-
-function normalizeIPFS(url: string): string {
-  return url.replace("ipfs://", "https://ipfs.io/ipfs/");
+  return isYouTubeStrict(url);
 }
 
 /**
@@ -249,7 +177,7 @@ export function extractHtmlTitle(html: string): string | null {
 export function isYouTubeStrict(url: string): boolean {
   try {
     const { hostname } = new URL(url);
-    const host = hostname.replace(/^www\./, "");
+    const host = hostname.toLowerCase().replace(/^(www|m)\./, "");
     return host === "youtube.com" || host === "youtu.be";
   } catch {
     return false;

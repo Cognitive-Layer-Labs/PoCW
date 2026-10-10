@@ -10,6 +10,7 @@
 import { FalkorDB, Graph } from "falkordb";
 import { KGNode, KGEdge, KnowledgeGraph } from "./kg-builder";
 import { difficultyToBloom } from "./irt-engine";
+import { PoCWError } from "../sdk/types";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type R = Record<string, any>;
@@ -91,10 +92,17 @@ export async function closeFalkorDB(): Promise<void> {
   }
 }
 
-/** Get the graph instance, auto-initializing if needed. */
-async function getGraph(): Promise<Graph> {
+/** Get the graph instance, auto-initializing if needed. Null when FalkorDB is unreachable. */
+async function tryGetGraph(): Promise<Graph | null> {
   if (!graph) await initFalkorDB();
-  return graph!;
+  return graph;
+}
+
+/** Get the graph instance or throw GRAPH_DB_ERROR when FalkorDB is unreachable. */
+async function getGraph(): Promise<Graph> {
+  const g = await tryGetGraph();
+  if (!g) throw new PoCWError("GRAPH_DB_ERROR", "Graph database (FalkorDB) is unavailable");
+  return g;
 }
 
 /**
@@ -365,8 +373,10 @@ export async function getImportantConcepts(
   threshold = 0.65,
   minCount = 3
 ): Promise<KGNode[]> {
+  if (_getImportantConceptsOverride) return _getImportantConceptsOverride(contentId, threshold, minCount);
   if (!falkorAvailable) return [];
-  const g = await getGraph();
+  const g = await tryGetGraph();
+  if (!g) return []; // connection failed — degrade to "no tracked concepts"
 
   // All nodes ordered by importance desc
   const result = await g.query<R>(
@@ -399,7 +409,8 @@ export async function getConceptWithEdges(
   edgeDirection: 'direct' | 'incoming' | 'outgoing' = 'direct'
 ): Promise<{ concept: KGNode | null; edges: KGEdge[]; neighborNodes: KGNode[] }> {
   if (!falkorAvailable) return { concept: null, edges: [], neighborNodes: [] };
-  const g = await getGraph();
+  const g = await tryGetGraph();
+  if (!g) return { concept: null, edges: [], neighborNodes: [] };
 
   // Fetch the concept itself
   const conceptResult = await g.query<R>(
@@ -456,4 +467,13 @@ export function __setGetConceptsByDifficultyForTest(
   fn: typeof getConceptsByDifficulty | null
 ): void {
   _getConceptsByDifficultyOverride = fn;
+}
+
+/** For testing: override getImportantConcepts */
+let _getImportantConceptsOverride: typeof getImportantConcepts | null = null;
+
+export function __setGetImportantConceptsForTest(
+  fn: typeof getImportantConcepts | null
+): void {
+  _getImportantConceptsOverride = fn;
 }

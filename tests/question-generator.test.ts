@@ -82,8 +82,8 @@ describe("Question Generator", () => {
   describe("gradeAnswer()", () => {
     it("grades a correct answer", async () => {
       const mockGrade = {
-        accuracy: 22, depth: 20, specificity: 23, reasoning_score: 20,
-        score: 85, correct: true, reasoning: "Good understanding"
+        covered_points: 17, total_points: 20, precision_cap: 100,
+        correct: true, reasoning: "Good understanding"
       };
 
       llmClient.__setOpenAIClientProviderForTest(() => ({
@@ -103,18 +103,17 @@ describe("Question Generator", () => {
         "proof_of_work"
       );
 
-      expect(result.score).to.equal(85);
+      expect(result.score).to.equal(85); // 17/20 claims covered
       expect(result.correct).to.be.true;
-      expect(result.dimensions.accuracy).to.equal(22);
-      expect(result.dimensions.depth).to.equal(20);
-      expect(result.dimensions.specificity).to.equal(23);
-      expect(result.dimensions.reasoning).to.equal(20);
+      expect(result.dimensions!.covered_points).to.equal(17);
+      expect(result.dimensions!.total_points).to.equal(20);
+      expect(result.dimensions!.precision_cap).to.equal(100);
     });
 
     it("grades a wrong answer", async () => {
       const mockGrade = {
-        accuracy: 3, depth: 2, specificity: 5, reasoning_score: 5,
-        score: 15, correct: false, reasoning: "Irrelevant answer"
+        covered_points: 3, total_points: 20, precision_cap: 100,
+        correct: false, reasoning: "Irrelevant answer"
       };
 
       llmClient.__setOpenAIClientProviderForTest(() => ({
@@ -131,12 +130,12 @@ describe("Question Generator", () => {
 
       expect(result.score).to.equal(15);
       expect(result.correct).to.be.false;
-      expect(result.dimensions.accuracy).to.equal(3);
+      expect(result.dimensions!.covered_points).to.equal(3);
     });
 
     it("defaults correct based on threshold when LLM omits it", async () => {
       const mockGrade = {
-        accuracy: 20, depth: 18, specificity: 17, reasoning_score: 15,
+        covered_points: 7, total_points: 10, precision_cap: 100,
         reasoning: "Decent answer"
       };
 
@@ -151,9 +150,9 @@ describe("Question Generator", () => {
       } as any));
 
       const result = await gradeAnswer("Q?", "A", "S", "c");
-      expect(result.score).to.equal(70); // 20+18+17+15 = 70
-      expect(result.correct).to.be.true; // 70 >= 60
-      expect(result.dimensions.accuracy).to.equal(20);
+      expect(result.score).to.equal(70); // 7/10 claims covered
+      expect(result.correct).to.be.true; // 70 >= IRT_CORRECT_THRESHOLD (70)
+      expect(result.dimensions!.covered_points).to.equal(7);
     });
 
     it("throws GradingError on malformed grading response", async () => {

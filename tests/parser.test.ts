@@ -2,7 +2,8 @@ import { expect } from "chai";
 import nock from "nock";
 import fs from "fs";
 import path from "path";
-import { parseContentToText } from "../src/services/parser";
+import { parseContentToText, parseWebContentWithTitle } from "../src/services/parser";
+import { __setResolverForTest, isPrivateAddress } from "../src/services/safe-fetch";
 
 async function expectErrorMessage(fn: () => Promise<unknown>, expected: RegExp): Promise<void> {
   try {
@@ -63,15 +64,41 @@ describe("parseContentToText", function () {
     expect(text.length).to.be.greaterThan(10);
   });
 
-  it("parses IPFS TXT via gateway", async () => {
-    nock("https://ipfs.io")
-      .get("/ipfs/QM_TEST_HASH")
-      .reply(200, "IPFS text content", {
-        "Content-Type": "text/plain"
+  it("follows a redirect to another public URL", async () => {
+    nock("https://example.com")
+      .get("/old")
+      .reply(301, "", { Location: "https://example.org/new.txt" });
+    nock("https://example.org")
+      .get("/new.txt")
+      .reply(200, "Redirected text body", { "Content-Type": "text/plain" });
+
+    const text = await parseContentToText("https://example.com/old");
+    expect(text).to.contain("Redirected text body");
+  });
+
+  it("decodes gzip-compressed responses", async () => {
+    const zlib = await import("zlib");
+    nock("https://example.com")
+      .get("/gz.txt")
+      .reply(200, zlib.gzipSync(Buffer.from("Compressed hello")), {
+        "Content-Type": "text/plain",
+        "Content-Encoding": "gzip",
       });
 
-    const text = await parseContentToText("ipfs://QM_TEST_HASH");
-    expect(text).to.contain("IPFS text");
+    const text = await parseContentToText("https://example.com/gz.txt");
+    expect(text).to.contain("Compressed hello");
+  });
+
+  it("returns the HTML <title> via parseWebContentWithTitle", async () => {
+    nock("https://example.com")
+      .get("/page")
+      .reply(200, "<html><head><title>My Page</title></head><body><p>Body text</p></body></html>", {
+        "Content-Type": "text/html",
+      });
+
+    const parsed = await parseWebContentWithTitle("https://example.com/page");
+    expect(parsed.htmlTitle).to.equal("My Page");
+    expect(parsed.text).to.contain("Body text");
   });
 
   it("parses YouTube transcript", async () => {
@@ -169,10 +196,17 @@ describe("parseContentToText", function () {
     );
   });
 
-  it("rejects malformed IPFS URL", async () => {
+  it("rejects ipfs:// sources (not supported)", async () => {
     await expectErrorMessage(
-      () => parseContentToText("ipfs://"),
-      /invalid ipfs url/i
+      () => parseContentToText("ipfs://QmSomething"),
+      /unsupported url protocol/i
+    );
+  });
+
+  it("rejects file:// sources (no local file access)", async () => {
+    await expectErrorMessage(
+      () => parseContentToText("file:///etc/passwd"),
+      /unsupported url protocol/i
     );
   });
 
@@ -224,5 +258,85 @@ describe("parseContentToText", function () {
       () => parseContentToText("https://example.com/bin"),
       /unsupported binary content/i
     );
+  });
+});
+
+describe("SSRF protection", function () {
+  this.timeout(20000);
+
+  afterEach(() => {
+    nock.cleanAll();
+    // restore the default test resolver (see tests/setup.ts)
+    __setResolverForTest(async () => [{ address: "93.184.215.14", family: 4 }]);
+  });
+
+  const blockedLiterals = [
+    "http://127.0.0.1/",
+    "http://localhost:6379/",
+    "http://10.0.0.5/x",
+    "http://172.18.0.3/",
+    "http://192.168.1.1/",
+    "http://169.254.169.254/latest/meta-data/",
+    "http://100.64.0.1/",
+    "http://0.0.0.0/",
+    "http://2130706433/",   // decimal form of 127.0.0.1
+    "http://[::1]/",
+    "http://[fd00::1]/",
+    "http://[::ffff:127.0.0.1]/",
+  ];
+
+  for (const url of blockedLiterals) {
+    it(`blocks ${url}`, async () => {
+      await expectErrorMessage(() => parseContentToText(url), /ssrf blocked/i);
+    });
+  }
+
+  it("blocks a hostname that resolves to a private address (e.g. a Docker service name)", async () => {
+    __setResolverForTest(async (host) =>
+      host === "redis" ? [{ address: "172.18.0.3", family: 4 }] : [{ address: "93.184.215.14", family: 4 }]
+    );
+    await expectErrorMessage(() => parseContentToText("http://redis:6379/"), /ssrf blocked.*172\.18\.0\.3/i);
+  });
+
+  it("blocks when ANY resolved address is private", async () => {
+    __setResolverForTest(async () => [
+      { address: "93.184.215.14", family: 4 },
+      { address: "10.1.2.3", family: 4 },
+    ]);
+    await expectErrorMessage(() => parseContentToText("https://mixed.example/"), /ssrf blocked/i);
+  });
+
+  it("blocks a redirect to a private IP", async () => {
+    nock("https://example.com")
+      .get("/redir")
+      .reply(302, "", { Location: "http://169.254.169.254/latest/meta-data/" });
+    await expectErrorMessage(() => parseContentToText("https://example.com/redir"), /ssrf blocked/i);
+  });
+
+  it("blocks a redirect to an internal hostname", async () => {
+    __setResolverForTest(async (host) =>
+      host === "falkordb" ? [{ address: "172.20.0.2", family: 4 }] : [{ address: "93.184.215.14", family: 4 }]
+    );
+    nock("https://example.com")
+      .get("/redir2")
+      .reply(307, "", { Location: "http://falkordb:6379/" });
+    await expectErrorMessage(() => parseContentToText("https://example.com/redir2"), /ssrf blocked/i);
+  });
+
+  it("stops after too many redirects", async () => {
+    nock("https://example.com")
+      .persist()
+      .get("/loop")
+      .reply(302, "", { Location: "https://example.com/loop" });
+    await expectErrorMessage(() => parseContentToText("https://example.com/loop"), /too many redirects/i);
+  });
+
+  it("classifies addresses correctly", () => {
+    expect(isPrivateAddress("8.8.8.8")).to.be.false;
+    expect(isPrivateAddress("172.66.147.243")).to.be.false;
+    expect(isPrivateAddress("2606:4700::6810:84e5")).to.be.false;
+    expect(isPrivateAddress("172.31.255.255")).to.be.true;
+    expect(isPrivateAddress("fe80::1%eth0")).to.be.true;
+    expect(isPrivateAddress("not-an-ip")).to.be.true;
   });
 });

@@ -40,13 +40,17 @@ ALTER TABLE content_index ADD COLUMN title TEXT;
 ALTER TABLE content_index ADD COLUMN description TEXT;
 `;
 
-// Migration: add access-control + visibility columns if they don't exist
-const ADD_ACCESS_COLUMNS = [
-  "ALTER TABLE content_index ADD COLUMN tier TEXT DEFAULT 'free'",
-  "ALTER TABLE content_index ADD COLUMN kal_price INTEGER",
-  "ALTER TABLE content_index ADD COLUMN unlock_rule TEXT",
-  "ALTER TABLE content_index ADD COLUMN hidden INTEGER DEFAULT 0",
-];
+// Migration: add the visibility column if it doesn't exist.
+// (Databases created by older versions may carry extra legacy columns; they are ignored.)
+const ADD_HIDDEN_COLUMN = "ALTER TABLE content_index ADD COLUMN hidden INTEGER DEFAULT 0";
+
+// Columns exposed as ContentRow. Selected explicitly so legacy columns present in databases
+// created by older versions never leak into API responses.
+const ROW_COLUMNS = [
+  "knowledge_id", "content_type", "source", "title", "description", "status", "error",
+  "content_id", "content_hash", "chunk_count", "created_at", "indexed_at", "usage_count",
+  "last_used_at", "hidden",
+].join(", ");
 
 // ─── Write Queue — serializes all mutating calls to prevent SQLITE_BUSY ──
 
@@ -83,13 +87,11 @@ export function initContentStore(
     // Columns already exist — ignore
   }
 
-  // Add access-control columns if they don't exist (idempotent)
-  for (const stmt of ADD_ACCESS_COLUMNS) {
-    try {
-      db.exec(stmt);
-    } catch {
-      // Column already exists — ignore
-    }
+  // Add visibility column if it doesn't exist (idempotent)
+  try {
+    db.exec(ADD_HIDDEN_COLUMN);
+  } catch {
+    // Column already exists — ignore
   }
 }
 
@@ -104,7 +106,7 @@ function getDb(): Database.Database {
  */
 export function getContent(knowledgeId: string): ContentRow | null {
   const row = getDb()
-    .prepare("SELECT * FROM content_index WHERE knowledge_id = ?")
+    .prepare(`SELECT ${ROW_COLUMNS} FROM content_index WHERE knowledge_id = ?`)
     .get(knowledgeId) as ContentRow | undefined;
   return row ?? null;
 }
@@ -173,40 +175,6 @@ export async function updateMetadata(
   });
 }
 
-export interface UnlockRule {
-  /** "any" = hold any ONE of the listed SBT content-ids. */
-  mode: "any";
-  /** Integer content_ids whose corresponding SBT unlocks this course. */
-  sbtContentIds: number[];
-}
-
-/**
- * Update the access-control tier for a content entry.
- */
-export async function updateAccess(
-  knowledgeId: string,
-  access: {
-    tier: "free" | "paid" | "unlocked";
-    kalPrice?: number | null;
-    unlockRule?: UnlockRule | null;
-  }
-): Promise<void> {
-  return runSerialized(() => {
-    getDb()
-      .prepare(`
-        UPDATE content_index
-        SET tier = ?, kal_price = ?, unlock_rule = ?
-        WHERE knowledge_id = ?
-      `)
-      .run(
-        access.tier,
-        access.kalPrice ?? null,
-        access.unlockRule ? JSON.stringify(access.unlockRule) : null,
-        knowledgeId
-      );
-  });
-}
-
 /**
  * Show or hide a content entry from the public catalog (admin visibility toggle).
  * Hidden entries stay fully indexed but are excluded from listContent by default.
@@ -272,7 +240,7 @@ export function listContent(options?: {
     .get(...params) as { count: number };
 
   const rows = db
-    .prepare(`SELECT * FROM content_index ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`)
+    .prepare(`SELECT ${ROW_COLUMNS} FROM content_index ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`)
     .all(...params, limit, offset) as ContentRow[];
 
   return { rows, total: total.count };

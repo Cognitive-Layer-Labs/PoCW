@@ -2,23 +2,11 @@
  * KAQG-CAT IRT Engine (4PL MAP)
  *
  * Ability estimation via standard (unweighted) 4PL MAP Newton-Raphson.
- * Bloom weights affect ONLY the KAL reward (see calculateKAL), never θ/SE.
  * Item selection via concept mastery loop:
  *   1. Re-ask failed important concepts (different edge direction each retry).
  *   2. Ask highest-importance untested concept.
  *   3. Pure Fisher Information once all important concepts resolved.
  */
-
-// ─── Bloom weights ────────────────────────────────────────────────────────────
-
-export const BLOOM_WEIGHTS: Record<string, number> = {
-  Remember:   0.10,
-  Understand: 0.25,
-  Apply:      0.50,
-  Analyze:    0.80,
-  Evaluate:   1.30,
-  Create:     2.00,
-};
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -30,7 +18,6 @@ export interface IRTResponse {
   correct: boolean;
   score: number;
   bloomLevel: string;
-  bloomWeight: number;
 }
 
 export interface IRTState {
@@ -172,10 +159,9 @@ export function updateAbility(
   score: number,
   bloomLevel: string
 ): IRTState {
-  const bloomWeight = BLOOM_WEIGHTS[bloomLevel] ?? 0.5;
   const newResponses: IRTResponse[] = [
     ...state.responses,
-    { difficulty, a, c, d, correct, score, bloomLevel, bloomWeight }
+    { difficulty, a, c, d, correct, score, bloomLevel }
   ];
 
   const theta = estimateTheta(newResponses, state.theta);

@@ -1,74 +1,136 @@
 import express, { Request, Response, NextFunction } from "express";
 import rateLimit from "express-rate-limit";
+import { createHash, timingSafeEqual } from "crypto";
 import * as path from "path";
 import { PoCW } from "./sdk/index";
 import { VerifySession } from "./sdk/verify-session";
-import { PoCWError, PoCWErrorCode } from "./sdk/types";
-import { initSessionStore, saveSession, loadSession, deleteSession } from "./services/session-store";
+import { PoCWError, PoCWErrorCode, ContentRow } from "./sdk/types";
+import { initSessionStore, saveSession, loadSession } from "./services/session-store";
 import { getFullGraph, isFalkorAvailable } from "./services/kg-store";
-import { getContent, updateMetadata, updateAccess, listContent as storeListContent } from "./sdk/content-store";
-import { checkHasPaid, checkHoldsPrereqSBT, signPriceQuote } from "./services/access-guard";
+import { getContent, updateMetadata } from "./sdk/content-store";
 import { rederiveTitle } from "./services/parser";
-import { requireAdminAction } from "./services/admin-auth";
-import { initAttestationStore, saveAttestation, getAttestation, listAttestationsBySubject } from "./services/attestation-store";
-import { buildAttestation } from "./sdk/attestation";
-import { controllerAddress as cfgController, sbtAddress as cfgSbt } from "./services/chain-config";
-import { ethers } from "ethers";
-
-/** Deterministic per-holder ERC-1155 token id (matches PoCW_Controller.sbtTokenId). */
-function sbtTokenId(user: string, contentId: number): string {
-  return ethers.toBigInt(ethers.keccak256(
-    ethers.AbiCoder.defaultAbiCoder().encode(["address", "uint256"], [user, BigInt(contentId)])
-  )).toString();
-}
 
 const app = express();
+app.disable("x-powered-by");
 
-// CORS — allow the Next.js dev frontend (port 3001) and any CORS_ORIGIN override
-app.use((req: Request, res: Response, next: NextFunction): void => {
-  const origin = process.env.CORS_ORIGIN ?? "http://localhost:3001";
-  res.header("Access-Control-Allow-Origin", origin);
-  res.header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS");
-  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  if (req.method === "OPTIONS") {
-    res.sendStatus(204);
-    return;
-  }
-  next();
-});
+// ─── Proxy trust ─────────────────────────────────────────────────────────────
+//
+// The engine runs behind a server-side proxy (the landing app). To rate-limit per real
+// client IP, set TRUST_PROXY to the number of proxy hops that append to X-Forwarded-For
+// (e.g. "1"), or any value Express accepts ("loopback", "10.0.0.0/8", "true"...).
+// Unset / "false" / "0" → X-Forwarded-For is ignored (default).
 
-app.use(express.json());
+export function parseTrustProxy(raw: string | undefined): boolean | number | string {
+  const value = (raw ?? "").trim();
+  if (!value || value.toLowerCase() === "false") return false;
+  if (value.toLowerCase() === "true") return true;
+  if (/^\d+$/.test(value)) return parseInt(value, 10);
+  return value;
+}
+app.set("trust proxy", parseTrustProxy(process.env.TRUST_PROXY));
+
+// ─── CORS (opt-in) ───────────────────────────────────────────────────────────
+// Browsers never call the engine directly in the standard deployment (the landing
+// proxies server-side), so CORS headers are only sent when CORS_ORIGIN is set.
+const CORS_ORIGIN = process.env.CORS_ORIGIN?.trim();
+if (CORS_ORIGIN) {
+  app.use((req: Request, res: Response, next: NextFunction): void => {
+    res.header("Access-Control-Allow-Origin", CORS_ORIGIN);
+    res.header("Vary", "Origin");
+    res.header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS");
+    res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    if (req.method === "OPTIONS") {
+      res.sendStatus(204);
+      return;
+    }
+    next();
+  });
+}
+
+app.use(express.json({ limit: "1mb" }));
 app.use(express.static(path.join(__dirname, "..", "public")));
 
-// 3.4 — Rate limiting: 30 requests per minute per IP
+// ─── Rate limiting ───────────────────────────────────────────────────────────
+
+const rateLimitMessage = { error: "Too many requests — please slow down", code: "CAPACITY_EXCEEDED" };
+
+/** Index status polling (GET /api/index/:knowledgeId) — frequent but cheap. */
+function isStatusPoll(req: Request): boolean {
+  return req.method === "GET" && /^\/api\/index\/[^/]+\/?$/.test(req.path);
+}
+
+// Main limiter: 30 requests per minute per client IP (status polling + /health excluded).
 const limiter = rateLimit({
   windowMs: 60_000,
-  max: 30,
+  limit: 30,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { error: "Too many requests — please slow down", code: "CAPACITY_EXCEEDED" },
+  message: rateLimitMessage,
+  skip: (req) => req.path === "/health" || isStatusPoll(req),
 });
-app.use(limiter);
 
-// API key auth — required in production, optional in local dev.
-// Set POCW_API_KEY in .env to protect all /api routes.
-// If NODE_ENV=production and POCW_API_KEY is unset, the server will refuse to start (see server.ts).
-const API_KEY = process.env.POCW_API_KEY;
+// Status polling gets its own generous budget (a client polling every ~5 s uses 12/min).
+const statusLimiter = rateLimit({
+  windowMs: 60_000,
+  limit: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: rateLimitMessage,
+});
+
+app.use(limiter);
+app.use((req: Request, res: Response, next: NextFunction) =>
+  isStatusPoll(req) ? statusLimiter(req, res, next) : next()
+);
+
+// ─── Auth ────────────────────────────────────────────────────────────────────
+
+/** Constant-time bearer check (hashing first removes the length side-channel). */
+function bearerMatches(req: Request, secret: string): boolean {
+  const header = req.headers.authorization ?? "";
+  const match = /^Bearer\s+(.+)$/i.exec(header);
+  if (!match) return false;
+  const given = createHash("sha256").update(match[1].trim()).digest();
+  const expected = createHash("sha256").update(secret).digest();
+  return timingSafeEqual(given, expected);
+}
+
+function isAdminPath(req: Request): boolean {
+  return req.path === "/admin" || req.path.startsWith("/admin/");
+}
+
+// API key auth for /api/* (admin routes use ADMIN_API_KEY instead — see below).
+// When POCW_API_KEY is unset the API is open (local dev only; server.ts refuses to start
+// without it when NODE_ENV=production).
 function requireApiKey(req: Request, res: Response, next: NextFunction): void {
-  if (!API_KEY) {
-    next(); // open mode — local dev only
-    return;
-  }
-  const auth = req.headers.authorization;
-  if (auth !== `Bearer ${API_KEY}`) {
-    res.status(401).json({ error: "Unauthorized — invalid or missing API key", code: "INVALID_CONFIG" });
+  if (isAdminPath(req)) return next();
+  const apiKey = process.env.POCW_API_KEY;
+  if (!apiKey) return next();
+  if (!bearerMatches(req, apiKey)) {
+    res.status(401).json({ error: "Unauthorized — invalid or missing API key", code: "UNAUTHORIZED" });
     return;
   }
   next();
 }
 app.use("/api", requireApiKey);
 
-// Shared PoCW instance (initialized by server.ts)
+// Admin auth: separate bearer ADMIN_API_KEY. Unset → admin API disabled (403).
+function requireAdmin(req: Request, res: Response, next: NextFunction): void {
+  const adminKey = process.env.ADMIN_API_KEY;
+  if (!adminKey) {
+    res.status(403).json({ error: "Admin API disabled — ADMIN_API_KEY is not configured", code: "FORBIDDEN" });
+    return;
+  }
+  if (!bearerMatches(req, adminKey)) {
+    res.status(401).json({ error: "Unauthorized — invalid or missing admin key", code: "UNAUTHORIZED" });
+    return;
+  }
+  next();
+}
+app.use("/api/admin", requireAdmin);
+
+// ─── Shared state ────────────────────────────────────────────────────────────
+
 let pocw: PoCW | null = null;
 
 export function setPoCWInstance(instance: PoCW): void {
@@ -80,51 +142,73 @@ function getPoCW(): PoCW {
   return pocw;
 }
 
-// Active verify sessions are persisted in Redis (TTL 30 min).
-// The Map is only a local cache for hot sessions — the source of truth is Redis.
-const verifySessions = new Map<string, VerifySession>();
+// Active verify sessions are persisted in Redis (TTL 30 min). This Map is only a bounded
+// local cache of hot sessions; the source of truth is Redis.
+const SESSION_CACHE_IDLE_MS = 30 * 60_000;
+const SESSION_CACHE_MAX = 1000;
+const verifySessions = new Map<string, { session: VerifySession; lastUsed: number }>();
+
+function cacheSession(session: VerifySession): void {
+  verifySessions.delete(session.sessionId);
+  verifySessions.set(session.sessionId, { session, lastUsed: Date.now() });
+  while (verifySessions.size > SESSION_CACHE_MAX) {
+    const oldest = verifySessions.keys().next().value;
+    if (oldest === undefined) break;
+    verifySessions.delete(oldest);
+  }
+}
+
+const sweeper = setInterval(() => {
+  const cutoff = Date.now() - SESSION_CACHE_IDLE_MS;
+  for (const [id, entry] of verifySessions) {
+    if (entry.lastUsed < cutoff) verifySessions.delete(id);
+  }
+}, 5 * 60_000);
+sweeper.unref();
+
+/** Local cache → Redis. Rehydrates content chunks for sessions that still need them. */
+async function getSession(sessionId: string): Promise<VerifySession | undefined> {
+  const cached = verifySessions.get(sessionId);
+  if (cached) {
+    cacheSession(cached.session);
+    return cached.session;
+  }
+  const session = await loadSession(sessionId);
+  if (!session) return undefined;
+  if (!session.isComplete()) {
+    const { chunks } = await getPoCW().getContentChunks(session.knowledgeId);
+    session.rehydrateChunks(chunks);
+  }
+  cacheSession(session);
+  return session;
+}
 
 export async function initAppServices(): Promise<void> {
   await initSessionStore();
-  initAttestationStore();
 }
 
 const MAX_ANSWER_LENGTH = 50_000;
-const SUPPORTED_SOURCE_PROTOCOLS = new Set(["http:", "https:", "ipfs:"]);
+const MAX_SUBJECT_LENGTH = 200;
+const UPLOAD_LIMIT = "10mb";
 
 function validateIndexSourceUrl(source: string): string | null {
   const value = source.trim();
-  if (!value) {
-    return "source is required";
-  }
-
-  if (value.startsWith("ipfs://")) {
-    const remainder = value.slice("ipfs://".length).trim();
-    if (!remainder || remainder.startsWith("/") || /\s/.test(remainder)) {
-      return "Invalid source URL. Use ipfs://<CID>[/path]";
-    }
-    return null;
-  }
+  if (!value) return "source is required";
 
   let parsed: URL;
   try {
     parsed = new URL(value);
   } catch {
-    return "Invalid source URL. Use http://, https://, or ipfs://";
+    return "Invalid source URL. Use http:// or https://";
   }
-
-  if (!SUPPORTED_SOURCE_PROTOCOLS.has(parsed.protocol)) {
-    return `Unsupported source URL protocol \"${parsed.protocol}\". Use http://, https://, or ipfs://`;
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return `Unsupported source URL protocol "${parsed.protocol}". Use http:// or https://`;
   }
-
-  if (!parsed.hostname) {
-    return "Invalid source URL. Hostname is required";
-  }
-
+  if (!parsed.hostname) return "Invalid source URL. Hostname is required";
   return null;
 }
 
-// ─── Error Mapping ───────────────────────────────────────────────────────────
+// ─── Error mapping ───────────────────────────────────────────────────────────
 
 const HTTP_STATUS: Record<PoCWErrorCode, number> = {
   CONTENT_NOT_FOUND: 404,
@@ -135,87 +219,114 @@ const HTTP_STATUS: Record<PoCWErrorCode, number> = {
   SESSION_NOT_ACTIVE: 409,
   LLM_ERROR: 503,
   GRAPH_DB_ERROR: 503,
-  ATTESTATION_ERROR: 500,
   CAPACITY_EXCEEDED: 429,
 };
 
 function sendError(res: Response, err: unknown): void {
   if (err instanceof PoCWError) {
     const status = HTTP_STATUS[err.code] || 500;
-    const payload: any = { error: err.message, code: err.code };
-    if (err.code === "INDEXING_IN_PROGRESS") {
-      res.set("Retry-After", "5");
-    }
-    res.status(status).json(payload);
-  } else {
-    const message = err instanceof Error ? err.message : "Internal server error";
-    res.status(500).json({ error: message });
+    if (err.code === "INDEXING_IN_PROGRESS") res.set("Retry-After", "5");
+    res.status(status).json({ error: err.message, code: err.code });
+    return;
   }
+  const name = err instanceof Error ? err.name : "";
+  if (name === "QuestionGenerationError" || name === "GradingError") {
+    console.error(`[engine] ${name}:`, (err as Error).message);
+    res.status(503).json({ error: "LLM temporarily unavailable — please retry", code: "LLM_ERROR" });
+    return;
+  }
+  console.error("[engine] Unhandled error:", err instanceof Error ? err.message : err);
+  res.status(500).json({ error: "Internal server error", code: "INTERNAL" });
 }
 
-// ─── File Upload Route ───────────────────────────────────────────────────────
+/** 200 when ready/failed (terminal), 202 + Retry-After while pending/indexing. */
+function sendIndexResult(res: Response, body: { status: string } & Record<string, unknown>): void {
+  const terminal = body.status === "ready" || body.status === "failed";
+  if (!terminal) res.set("Retry-After", "5");
+  res.status(terminal ? 200 : 202).json(body);
+}
+
+/** Public view of a content row. Raw-text sources (uploads) are truncated — they can be MBs. */
+function publicRow(row: ContentRow): ContentRow {
+  if (row.content_type === "raw_text" && row.source.length > 300) {
+    return { ...row, source: `${row.source.slice(0, 300)}…` };
+  }
+  return row;
+}
+
+// ─── Upload ──────────────────────────────────────────────────────────────────
 
 /**
  * POST /api/upload
- * Upload a binary file (PDF or text). Extracts text server-side and indexes it.
- * Content-Type: application/pdf  → extracted via pdf-parse
- * Content-Type: text/*           → decoded as UTF-8
+ * Raw body upload (<= 10 MB). Text is extracted server-side and indexed.
+ *   application/pdf           → pdf-parse
+ *   text/*                    → UTF-8
+ *   application/octet-stream  → PDF if it starts with %PDF-, else UTF-8 text
  */
 app.post(
   "/api/upload",
-  requireApiKey,
-  express.raw({ type: ["application/pdf", "text/*", "application/octet-stream"], limit: "10mb" }),
+  express.raw({ type: ["application/pdf", "text/*", "application/octet-stream"], limit: UPLOAD_LIMIT }),
   async (req: Request, res: Response) => {
-    if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+    if (!Buffer.isBuffer(req.body)) {
+      return res.status(415).json({
+        error: "Unsupported Content-Type — use application/pdf, text/* or application/octet-stream",
+        code: "INVALID_CONFIG",
+      });
+    }
+    if (req.body.length === 0) {
       return res.status(400).json({ error: "No file body received", code: "INVALID_CONFIG" });
     }
     try {
+      const body: Buffer = req.body;
+      const ct = (req.headers["content-type"] ?? "").toLowerCase();
+      const isPdf = ct.includes("pdf") || body.subarray(0, 5).toString("latin1") === "%PDF-";
       let text: string;
-      const ct = req.headers["content-type"] ?? "";
-      if (ct.includes("pdf")) {
+      if (isPdf) {
         // eslint-disable-next-line @typescript-eslint/no-var-requires
         const pdfParse = require("pdf-parse") as (b: Buffer) => Promise<{ text: string }>;
-        const parsed = await pdfParse(req.body);
-        text = parsed.text;
+        try {
+          text = (await pdfParse(body)).text;
+        } catch {
+          return res.status(422).json({ error: "Could not parse PDF", code: "INVALID_CONFIG" });
+        }
         if (!text.trim()) {
           return res.status(422).json({ error: "No text found in PDF — it may be image-only", code: "INVALID_CONFIG" });
         }
       } else {
-        text = req.body.toString("utf-8");
+        if (body.subarray(0, 8192).includes(0)) {
+          return res.status(415).json({ error: "Binary file not supported — upload a PDF or a text file", code: "INVALID_CONFIG" });
+        }
+        text = body.toString("utf-8");
+        if (!text.trim()) {
+          return res.status(400).json({ error: "Uploaded file is empty", code: "INVALID_CONFIG" });
+        }
       }
-      const result = await getPoCW().index(text);
-      const status = result.status === "ready" ? 200 : 202;
-      if (status === 202) res.set("Retry-After", "5");
-      return res.status(status).json(result);
+      const result = await getPoCW().index(text, { asText: true });
+      return sendIndexResult(res, { ...result });
     } catch (err) {
       return sendError(res, err);
     }
   }
 );
 
-// ─── Index Routes ────────────────────────────────────────────────────────────
+// ─── Index ───────────────────────────────────────────────────────────────────
 
 /**
  * POST /api/index
- * Index content for later verification.
- * Body: { source: string }
+ * Body: { source: "https://..." }
  */
 app.post("/api/index", async (req: Request, res: Response) => {
   const { source } = req.body || {};
   if (!source || typeof source !== "string") {
     return res.status(400).json({ error: "source is required", code: "INVALID_CONFIG" });
   }
-
   const validationError = validateIndexSourceUrl(source);
   if (validationError) {
     return res.status(400).json({ error: validationError, code: "INVALID_CONFIG" });
   }
-
   try {
-    const result = await getPoCW().index(source);
-    const status = result.status === "ready" ? 200 : 202;
-    if (status === 202) res.set("Retry-After", "5");
-    return res.status(status).json(result);
+    const result = await getPoCW().index(source.trim());
+    return sendIndexResult(res, { ...result });
   } catch (err) {
     return sendError(res, err);
   }
@@ -223,17 +334,18 @@ app.post("/api/index", async (req: Request, res: Response) => {
 
 /**
  * GET /api/index
- * List all indexed content (paginated).
- * Query params: status?, limit? (default 50), offset? (default 0)
+ * List indexed content (paginated). Query: status?, limit? (default 50, max 200), offset?
  */
 app.get("/api/index", (req: Request, res: Response) => {
   try {
+    const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : undefined;
+    const offset = req.query.offset ? parseInt(req.query.offset as string, 10) : undefined;
     const result = getPoCW().listContent({
-      status: req.query.status as string | undefined,
-      limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
-      offset: req.query.offset ? parseInt(req.query.offset as string, 10) : undefined,
+      status: typeof req.query.status === "string" ? req.query.status : undefined,
+      limit: limit && limit > 0 ? Math.min(limit, 200) : undefined,
+      offset: offset && offset > 0 ? offset : undefined,
     });
-    return res.json(result);
+    return res.json({ rows: result.rows.map(publicRow), total: result.total });
   } catch (err) {
     return sendError(res, err);
   }
@@ -241,263 +353,26 @@ app.get("/api/index", (req: Request, res: Response) => {
 
 /**
  * GET /api/index/:knowledgeId
- * Check indexing status.
+ * Indexing status. 202 + Retry-After while pending/indexing; 200 once ready or failed.
  */
 app.get("/api/index/:knowledgeId", (req: Request, res: Response) => {
   try {
     const result = getPoCW().getIndexStatus(req.params.knowledgeId);
     const row = getContent(req.params.knowledgeId);
-    const status = result.status === "ready" ? 200 : 202;
-    if (status === 202) res.set("Retry-After", "5");
-    return res.status(status).json({
+    return sendIndexResult(res, {
       ...result,
       title: row?.title ?? undefined,
-      source: row?.source ?? undefined,
+      // Only URL sources are echoed back (uploaded text can be several MB).
+      source: row && row.content_type === "url" ? row.source : undefined,
     });
   } catch (err) {
     return sendError(res, err);
   }
-});
-
-// ─── Verify Routes ───────────────────────────────────────────────────────────
-
-/**
- * POST /api/verify
- * Start a verification session.
- * Body: { knowledgeId, subject, config? }
- */
-app.post("/api/verify", async (req: Request, res: Response) => {
-  const { knowledgeId, subject, config } = req.body || {};
-  if (!knowledgeId || !subject) {
-    return res.status(400).json({ error: "knowledgeId and subject required", code: "INVALID_CONFIG" });
-  }
-
-  // ── Access gate ────────────────────────────────────────────────────────────
-  const row = getContent(knowledgeId);
-  if (row) {
-    const tier = row.tier ?? "free";
-    const contentId = row.content_id ?? 0;
-
-    if (tier === "paid") {
-      // Verify caller has paid via KalPaywall
-      const paid = await checkHasPaid(String(subject), contentId);
-      if (!paid) {
-        return res.status(403).json({
-          error: "Payment required — purchase access with KAL first",
-          code: "ACCESS_DENIED",
-          tier: "paid",
-          contentId,
-        });
-      }
-    } else if (tier === "unlocked") {
-      // Verify caller holds a prerequisite SBT. Fail CLOSED: an unlocked-tier course whose
-      // unlock_rule is missing/malformed/empty must NOT be served openly.
-      let prereqIds: number[] = [];
-      if (row.unlock_rule) {
-        try {
-          const rule = JSON.parse(row.unlock_rule) as { sbtContentIds?: number[] };
-          if (Array.isArray(rule.sbtContentIds)) prereqIds = rule.sbtContentIds;
-        } catch { /* malformed rule — prereqIds stays empty → fail closed below */ }
-      }
-      if (prereqIds.length === 0) {
-        return res.status(403).json({
-          error: "This course is gated but its unlock rule is misconfigured — access denied",
-          code: "ACCESS_DENIED",
-          tier: "unlocked",
-          contentId,
-        });
-      }
-      const holds = await checkHoldsPrereqSBT(String(subject), prereqIds);
-      if (!holds) {
-        return res.status(403).json({
-          error: "SBT required — you must hold a qualifying credential to access this course",
-          code: "ACCESS_DENIED",
-          tier: "unlocked",
-          prereqContentIds: prereqIds,
-        });
-      }
-    }
-    // tier === "free" → no gate
-  }
-  // ── End access gate ────────────────────────────────────────────────────────
-
-  try {
-    // Always use session mode for HTTP API (no onQuestion callback)
-    const safeConfig = { ...(config || {}) };
-    delete safeConfig.onQuestion;
-    const session = (await getPoCW().verify(knowledgeId, String(subject), safeConfig)) as unknown as VerifySession;
-    verifySessions.set(session.sessionId, session);
-    await saveSession(session);
-
-    return res.json({
-      sessionId: session.sessionId,
-      question: session.currentQuestion,
-      importantConceptCount: session.importantConceptCount,
-      maxQuestions: session.maxQuestions,
-    });
-  } catch (err) {
-    return sendError(res, err);
-  }
-});
-
-/**
- * POST /api/verify/:sessionId/answer
- * Submit an answer to the current question.
- * Body: { answer: string }
- */
-app.post("/api/verify/:sessionId/answer", async (req: Request, res: Response) => {
-  const { answer } = req.body || {};
-  if (typeof answer !== "string" || answer.length === 0 || answer.length > MAX_ANSWER_LENGTH) {
-    return res.status(400).json({
-      error: `answer is required (1-${MAX_ANSWER_LENGTH} characters)`,
-      code: "INVALID_CONFIG"
-    });
-  }
-
-  const sessionId = req.params.sessionId;
-  let session = verifySessions.get(sessionId);
-
-  // Fall back to Redis if not in local cache (e.g. after restart)
-  if (!session) {
-    session = await loadSession(sessionId);
-    if (!session) {
-      return res.status(404).json({ error: "Session not found", code: "CONTENT_NOT_FOUND" });
-    }
-    // Rehydrate chunks from contentCache
-    const pocw = getPoCW();
-    const row = getContent(session.knowledgeId);
-    if (row?.source) {
-      const { chunks } = await (pocw as any).getContentChunks(session.knowledgeId, row.source);
-      session.rehydrateChunks(chunks);
-    }
-    verifySessions.set(sessionId, session);
-  }
-
-  try {
-    const feedback = await session.submitAnswer(answer);
-    await saveSession(session);
-    const payload: Record<string, unknown> = { ...feedback };
-    if (!feedback.isComplete && session.isActive()) {
-      payload.nextQuestion = session.currentQuestion;
-    }
-    return res.json(payload);
-  } catch (err) {
-    return sendError(res, err);
-  }
-});
-
-/**
- * GET /api/verify/:sessionId/result
- * Get the final result of a completed session.
- */
-app.get("/api/verify/:sessionId/result", async (req: Request, res: Response) => {
-  const sessionId = req.params.sessionId;
-  let session = verifySessions.get(sessionId);
-  if (!session) {
-    session = await loadSession(sessionId);
-    if (!session) {
-      return res.status(404).json({ error: "Session not found", code: "CONTENT_NOT_FOUND" });
-    }
-    const pocw = getPoCW();
-    const row = getContent(session.knowledgeId);
-    if (row?.source) {
-      const { chunks } = await (pocw as any).getContentChunks(session.knowledgeId, row.source);
-      session.rehydrateChunks(chunks);
-    }
-    verifySessions.set(sessionId, session);
-  }
-
-  try {
-    const result = await session.getResult();
-
-    // Persist a passing attestation so the learner can re-mint later (recovery) and the account
-    // page can list earned SBTs. KAL + SBT are minted on-chain by the user via verifyAndMint —
-    // the oracle no longer mints off-chain.
-    if (result.competenceIndicator && result.attestation && result.tokenUri) {
-      saveAttestation({
-        subject: result.subject,
-        contentId: result.contentId,
-        knowledgeId: result.knowledgeId,
-        score: Math.round(result.score),
-        kalAmountWei: result.attestation.kalAmount,
-        tokenUri: result.tokenUri,
-        contentHash: result.attestation.contentHash,
-      });
-    }
-
-    verifySessions.delete(sessionId);
-    await deleteSession(sessionId);
-    return res.json(result);
-  } catch (err) {
-    return sendError(res, err);
-  }
-});
-
-/**
- * POST /api/verify/reattest — re-issue a fresh attestation (new nonce/expiry) for a passing
- * session the learner already earned, so they can mint later (e.g. after they get gas).
- * Body: { address, contentId }.
- */
-app.post("/api/verify/reattest", async (req: Request, res: Response) => {
-  const { address, contentId } = req.body ?? {};
-  if (!address || typeof address !== "string" || contentId == null) {
-    return res.status(400).json({ error: "address and contentId required", code: "INVALID_CONFIG" });
-  }
-  const stored = getAttestation(address, Number(contentId));
-  if (!stored) {
-    return res.status(404).json({ error: "No earned attestation for this address + content", code: "CONTENT_NOT_FOUND" });
-  }
-  try {
-    const controllerAddr = cfgController();
-    const sbtAddr = cfgSbt();
-    const chain = controllerAddr && sbtAddr
-      ? { controllerAddress: controllerAddr, sbtAddress: sbtAddr }
-      : undefined;
-    const attestation = await buildAttestation(
-      chain ? "onchain" : "offchain",
-      stored.subject,
-      stored.contentId,
-      stored.score,
-      stored.kalAmountWei,
-      stored.tokenUri,
-      stored.contentHash ?? "",
-      chain
-    );
-    return res.json({ attestation, subject: stored.subject, contentId: stored.contentId, tokenUri: stored.tokenUri });
-  } catch (err) {
-    return sendError(res, err);
-  }
-});
-
-/**
- * GET /api/sbts/:address — list the SBTs a learner has earned (from oracle records), so the
- * account page can show them + verify with on-chain balanceOf, without scanning the chain.
- */
-app.get("/api/sbts/:address", (req: Request, res: Response) => {
-  const address = req.params.address;
-  if (!ethers.isAddress(address)) {
-    return res.status(400).json({ error: "Invalid address", code: "INVALID_CONFIG" });
-  }
-  const items = listAttestationsBySubject(address).map((a) => ({
-    contentId: a.contentId,
-    tokenId: sbtTokenId(address, a.contentId),
-    knowledgeId: a.knowledgeId,
-    score: a.score,
-    tokenUri: a.tokenUri,
-  }));
-  return res.json({ address, sbts: items });
 });
 
 /**
  * PATCH /api/index/:knowledgeId/title
- * Re-derive and store a title for any indexed content (or accept a custom one).
- *
- * Without a body: re-fetches the source URL and derives the title via:
- *   YouTube → oEmbed  |  Web page → LLM(htmlTitle + URL + 4k chars)
- * With body { title: string }: stores the provided title directly.
- *
- * This fixes entries that were indexed before the strict YouTube detection
- * was deployed (e.g. Wikipedia URLs that got "YouTube video <slug>" titles).
+ * Re-derive the title from the source (no body) or store a custom one ({ title }).
  */
 app.patch("/api/index/:knowledgeId/title", async (req: Request, res: Response) => {
   const row = getContent(req.params.knowledgeId);
@@ -505,14 +380,14 @@ app.patch("/api/index/:knowledgeId/title", async (req: Request, res: Response) =
     return res.status(404).json({ error: "Content not found", code: "CONTENT_NOT_FOUND" });
   }
 
-  // Accept an explicit title override
-  let title: string | undefined = req.body?.title ?? undefined;
+  const provided = req.body?.title;
+  let title: string | undefined = typeof provided === "string" && provided.trim()
+    ? provided.trim().slice(0, 300)
+    : undefined;
 
-  // Auto-derive when no title is given
-  if (!title) {
+  if (!title && row.content_type === "url") {
     try {
-      const derived = await rederiveTitle(row.source);
-      title = derived ?? undefined;
+      title = (await rederiveTitle(row.source)) ?? undefined;
     } catch {
       // derivation failed — fall through to error below
     }
@@ -529,19 +404,105 @@ app.patch("/api/index/:knowledgeId/title", async (req: Request, res: Response) =
   return res.json({ knowledgeId: row.knowledge_id, title });
 });
 
-// ─── Graph Visualization ─────────────────────────────────────────────────────
+// ─── Verify ──────────────────────────────────────────────────────────────────
+
+/**
+ * POST /api/verify
+ * Body: { knowledgeId, subject?, config? } — subject is an optional free-form learner label.
+ */
+app.post("/api/verify", async (req: Request, res: Response) => {
+  const { knowledgeId, subject, config } = req.body || {};
+  if (!knowledgeId || typeof knowledgeId !== "string") {
+    return res.status(400).json({ error: "knowledgeId is required", code: "INVALID_CONFIG" });
+  }
+  if (subject !== undefined && subject !== null && typeof subject !== "string") {
+    return res.status(400).json({ error: "subject must be a string", code: "INVALID_CONFIG" });
+  }
+  if (config !== undefined && config !== null && (typeof config !== "object" || Array.isArray(config))) {
+    return res.status(400).json({ error: "config must be an object", code: "INVALID_CONFIG" });
+  }
+  const label = (typeof subject === "string" && subject.trim() ? subject.trim() : "anonymous")
+    .slice(0, MAX_SUBJECT_LENGTH);
+
+  try {
+    // Always session mode over HTTP (no onQuestion callback).
+    const safeConfig = { ...(config || {}) };
+    delete safeConfig.onQuestion;
+    const session = (await getPoCW().verify(knowledgeId, label, safeConfig)) as unknown as VerifySession;
+    cacheSession(session);
+    await saveSession(session);
+
+    return res.json({
+      sessionId: session.sessionId,
+      question: session.currentQuestion,
+      importantConceptCount: session.importantConceptCount,
+      maxQuestions: session.maxQuestions,
+    });
+  } catch (err) {
+    return sendError(res, err);
+  }
+});
+
+/**
+ * POST /api/verify/:sessionId/answer
+ * Body: { answer: string }
+ */
+app.post("/api/verify/:sessionId/answer", async (req: Request, res: Response) => {
+  const { answer } = req.body || {};
+  if (typeof answer !== "string" || answer.length === 0 || answer.length > MAX_ANSWER_LENGTH) {
+    return res.status(400).json({
+      error: `answer is required (1-${MAX_ANSWER_LENGTH} characters)`,
+      code: "INVALID_CONFIG",
+    });
+  }
+
+  try {
+    const session = await getSession(req.params.sessionId);
+    if (!session) {
+      return res.status(404).json({ error: "Session not found", code: "SESSION_EXPIRED" });
+    }
+    const feedback = await session.submitAnswer(answer);
+    await saveSession(session);
+    const payload: Record<string, unknown> = { ...feedback };
+    if (!feedback.isComplete && session.isActive()) {
+      payload.nextQuestion = session.currentQuestion;
+    }
+    return res.json(payload);
+  } catch (err) {
+    return sendError(res, err);
+  }
+});
+
+/**
+ * GET /api/verify/:sessionId/result
+ * Final result of a completed session. Idempotent while the session lives in Redis (30 min).
+ */
+app.get("/api/verify/:sessionId/result", async (req: Request, res: Response) => {
+  try {
+    const session = await getSession(req.params.sessionId);
+    if (!session) {
+      return res.status(404).json({ error: "Session not found", code: "SESSION_EXPIRED" });
+    }
+    const result = await session.getResult();
+    await saveSession(session); // persist the frozen result
+    verifySessions.delete(session.sessionId); // completed — no need to keep it hot
+    return res.json(result);
+  } catch (err) {
+    return sendError(res, err);
+  }
+});
+
+// ─── Graph ───────────────────────────────────────────────────────────────────
 
 /**
  * GET /api/graph/:knowledgeId
- * Returns the knowledge graph (nodes + edges) for a content ID.
- * Used by the graph visualization viewer.
+ * Knowledge graph { contentId, nodes, edges }. Also accepts a numeric contentId.
  */
 app.get("/api/graph/:knowledgeId", async (req: Request, res: Response) => {
   if (!isFalkorAvailable()) {
-    return res.status(503).json({ error: "FalkorDB unavailable", code: "INVALID_CONFIG" });
+    return res.status(503).json({ error: "Graph database unavailable", code: "GRAPH_DB_ERROR" });
   }
 
-  // Accept either the string knowledgeId (primary key) or a legacy numeric contentId.
   let contentId: number;
   const param = req.params.knowledgeId;
   const numeric = parseInt(param, 10);
@@ -556,92 +517,29 @@ app.get("/api/graph/:knowledgeId", async (req: Request, res: Response) => {
   }
 
   try {
-    const graph = await getFullGraph(contentId);
-    return res.json(graph);
+    return res.json(await getFullGraph(contentId));
   } catch (err) {
     return sendError(res, err);
   }
 });
 
-// ─── Admin Routes ─────────────────────────────────────────────────────────────
-//
-// Cosmetic admin address check: compares the X-Admin-Address header against the
-// ADMIN_ADDRESS env var (case-insensitive). The real protection is the API key
-// middleware already applied to all /api/* routes. For thesis-demo purposes this
-// is sufficient; full protection would require admin wallet signature verification.
-
-const ADMIN_ADDRESS = (process.env.ADMIN_ADDRESS ?? "").toLowerCase();
-
-function requireAdmin(req: Request, res: Response, next: NextFunction): void {
-  if (!ADMIN_ADDRESS) {
-    next(); // No address configured — open (dev mode only)
-    return;
-  }
-  const addr = (req.headers["x-admin-address"] as string ?? "").toLowerCase();
-  if (addr !== ADMIN_ADDRESS) {
-    res.status(403).json({ error: "Forbidden — admin wallet required", code: "INVALID_CONFIG" });
-    return;
-  }
-  next();
-}
+// ─── Admin (Authorization: Bearer <ADMIN_API_KEY>) ───────────────────────────
 
 /**
- * GET /api/admin/access
- * List all content with their access-control fields.
+ * GET /api/admin/content
+ * List all content including hidden entries. Query: status?, limit?, offset?
  */
-app.get("/api/admin/access", requireAdmin, (_req: Request, res: Response) => {
+app.get("/api/admin/content", (req: Request, res: Response) => {
   try {
-    const { rows } = storeListContent({ limit: 200, includeHidden: true });
-    const items = rows.map((r) => ({
-      knowledgeId: r.knowledge_id,
-      contentId: r.content_id,
-      title: r.title,
-      source: r.source,
-      status: r.status,
-      tier: r.tier ?? "free",
-      kalPrice: r.kal_price ?? null,
-      unlockRule: r.unlock_rule ? JSON.parse(r.unlock_rule) : null,
-      hidden: (r.hidden ?? 0) === 1,
-    }));
-    return res.json({ items });
-  } catch (err) {
-    return sendError(res, err);
-  }
-});
-
-/**
- * PATCH /api/admin/access/:knowledgeId
- * Set the access tier (free / paid / unlocked) and associated rule.
- * Body: { tier, kalPrice?, unlockRule? }
- */
-app.patch("/api/admin/access/:knowledgeId", requireAdmin, async (req: Request, res: Response) => {
-  const { knowledgeId } = req.params;
-  const row = getContent(knowledgeId);
-  if (!row) {
-    return res.status(404).json({ error: "Content not found", code: "CONTENT_NOT_FOUND" });
-  }
-
-  const { tier, kalPrice, unlockRule } = req.body ?? {};
-  const validTiers = ["free", "paid", "unlocked"];
-  if (!tier || !validTiers.includes(tier)) {
-    return res.status(400).json({ error: `tier must be one of: ${validTiers.join(", ")}`, code: "INVALID_CONFIG" });
-  }
-  if (tier === "paid" && (kalPrice == null || typeof kalPrice !== "number" || kalPrice <= 0)) {
-    return res.status(400).json({ error: "paid tier requires a positive numeric kalPrice", code: "INVALID_CONFIG" });
-  }
-  if (tier === "unlocked") {
-    if (!unlockRule || unlockRule.mode !== "any" || !Array.isArray(unlockRule.sbtContentIds) || unlockRule.sbtContentIds.length === 0) {
-      return res.status(400).json({ error: "unlocked tier requires unlockRule: { mode: 'any', sbtContentIds: number[] }", code: "INVALID_CONFIG" });
-    }
-  }
-
-  try {
-    await updateAccess(knowledgeId, {
-      tier,
-      kalPrice: tier === "paid" ? kalPrice : null,
-      unlockRule: tier === "unlocked" ? unlockRule : null,
+    const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : undefined;
+    const offset = req.query.offset ? parseInt(req.query.offset as string, 10) : undefined;
+    const result = getPoCW().listContent({
+      status: typeof req.query.status === "string" ? req.query.status : undefined,
+      limit: limit && limit > 0 ? Math.min(limit, 500) : 200,
+      offset: offset && offset > 0 ? offset : undefined,
+      includeHidden: true,
     });
-    return res.json({ knowledgeId, tier, kalPrice: kalPrice ?? null, unlockRule: unlockRule ?? null });
+    return res.json({ rows: result.rows.map(publicRow), total: result.total });
   } catch (err) {
     return sendError(res, err);
   }
@@ -649,18 +547,13 @@ app.patch("/api/admin/access/:knowledgeId", requireAdmin, async (req: Request, r
 
 /**
  * PATCH /api/admin/content/:knowledgeId/visibility
- * Show or hide a resource from the public catalog. Non-destructive + reversible, so it stays on
- * the cosmetic admin gate (no signature required).
- * Body: { hidden: boolean }
+ * Body: { hidden: boolean } — hide/show in the public catalog (reversible).
  */
-app.patch("/api/admin/content/:knowledgeId/visibility", requireAdmin, async (req: Request, res: Response) => {
+app.patch("/api/admin/content/:knowledgeId/visibility", async (req: Request, res: Response) => {
   const { knowledgeId } = req.params;
   const { hidden } = req.body ?? {};
   if (typeof hidden !== "boolean") {
     return res.status(400).json({ error: "hidden (boolean) is required", code: "INVALID_CONFIG" });
-  }
-  if (!getContent(knowledgeId)) {
-    return res.status(404).json({ error: "Content not found", code: "CONTENT_NOT_FOUND" });
   }
   try {
     await getPoCW().setVisibility(knowledgeId, hidden);
@@ -672,109 +565,39 @@ app.patch("/api/admin/content/:knowledgeId/visibility", requireAdmin, async (req
 
 /**
  * DELETE /api/admin/content/:knowledgeId
- * Cascade-delete a resource (FalkorDB graph + content row + cache). Earned SBTs/attestations are
- * preserved. Requires an EIP-712 admin signature in body._admin.
+ * Cascade-delete a resource (graph + content row + cache).
  */
-app.delete(
-  "/api/admin/content/:knowledgeId",
-  requireAdminAction("delete", (req) => req.params.knowledgeId),
-  async (req: Request, res: Response) => {
-    const { knowledgeId } = req.params;
-    if (!getContent(knowledgeId)) {
-      return res.status(404).json({ error: "Content not found", code: "CONTENT_NOT_FOUND" });
-    }
-    try {
-      const result = await getPoCW().deleteResource(knowledgeId);
-      return res.json({ deleted: true, ...result });
-    } catch (err) {
-      return sendError(res, err);
-    }
+app.delete("/api/admin/content/:knowledgeId", async (req: Request, res: Response) => {
+  try {
+    const result = await getPoCW().deleteResource(req.params.knowledgeId);
+    return res.json({ deleted: true, ...result });
+  } catch (err) {
+    return sendError(res, err);
   }
-);
+});
 
 /**
  * POST /api/admin/content/:knowledgeId/reindex
- * Drop the existing graph and re-run indexing from the original source. Returns 202 + Retry-After;
- * poll GET /api/index/:knowledgeId for completion. Requires an EIP-712 admin signature.
+ * Drop the graph and re-index from the original source. 202 + Retry-After; poll GET /api/index/:id.
  */
-app.post(
-  "/api/admin/content/:knowledgeId/reindex",
-  requireAdminAction("reindex", (req) => req.params.knowledgeId),
-  async (req: Request, res: Response) => {
-    const { knowledgeId } = req.params;
-    if (!getContent(knowledgeId)) {
-      return res.status(404).json({ error: "Content not found", code: "CONTENT_NOT_FOUND" });
-    }
-    try {
-      const result = await getPoCW().reindexResource(knowledgeId);
-      res.set("Retry-After", "5");
-      return res.status(202).json(result);
-    } catch (err) {
-      return sendError(res, err);
-    }
+app.post("/api/admin/content/:knowledgeId/reindex", async (req: Request, res: Response) => {
+  try {
+    const result = await getPoCW().reindexResource(req.params.knowledgeId);
+    res.set("Retry-After", "5");
+    return res.status(202).json(result);
+  } catch (err) {
+    return sendError(res, err);
   }
-);
+});
 
 /**
  * POST /api/admin/wipe
- * Wipe ALL resources (every graph + content row + cache). Attestations preserved.
- * Requires an EIP-712 admin signature over action="wipe", target="*".
+ * Wipe ALL resources (every graph + content row + cache).
  */
-app.post(
-  "/api/admin/wipe",
-  requireAdminAction("wipe", () => "*"),
-  async (_req: Request, res: Response) => {
-    try {
-      const result = await getPoCW().wipeAll();
-      return res.json({ wiped: true, ...result });
-    } catch (err) {
-      return sendError(res, err);
-    }
-  }
-);
-
-// ─── Access Quote ─────────────────────────────────────────────────────────────
-
-/**
- * POST /api/access/quote
- * Issue an oracle-signed price quote for a paid-tier course.
- * The frontend presents this to KalPaywall.purchase().
- * Body: { knowledgeId, buyer }
- */
-app.post("/api/access/quote", async (req: Request, res: Response) => {
-  const { knowledgeId, buyer } = req.body ?? {};
-  if (!knowledgeId || !buyer || typeof buyer !== "string") {
-    return res.status(400).json({ error: "knowledgeId and buyer (address) required", code: "INVALID_CONFIG" });
-  }
-
-  const row = getContent(knowledgeId);
-  if (!row) {
-    return res.status(404).json({ error: "Content not found", code: "CONTENT_NOT_FOUND" });
-  }
-  if ((row.tier ?? "free") !== "paid") {
-    return res.status(400).json({ error: "Course is not a paid tier — no quote needed", code: "INVALID_CONFIG" });
-  }
-  const kalPrice = row.kal_price;
-  if (!kalPrice || kalPrice <= 0) {
-    return res.status(400).json({ error: "No price configured for this course", code: "INVALID_CONFIG" });
-  }
-  const contentId = row.content_id ?? 0;
-
+app.post("/api/admin/wipe", async (_req: Request, res: Response) => {
   try {
-    const quote = await signPriceQuote(buyer, contentId, kalPrice);
-    if (!quote) {
-      // Oracle not configured — return an unsigned placeholder for dev
-      return res.json({
-        contentId,
-        priceKal: kalPrice,
-        priceWei: ethers.parseEther(String(kalPrice)).toString(), // decimal-safe (kalPrice may be fractional)
-        expiry: Math.floor(Date.now() / 1000) + 600,
-        nonce: "0x0000000000000000000000000000000000000000000000000000000000000001",
-        signature: "0x",
-        unsigned: true,
-      });
-    }
-    return res.json(quote);
+    const result = await getPoCW().wipeAll();
+    return res.json({ wiped: true, ...result });
   } catch (err) {
     return sendError(res, err);
   }
@@ -783,7 +606,26 @@ app.post("/api/access/quote", async (req: Request, res: Response) => {
 // ─── Health ──────────────────────────────────────────────────────────────────
 
 app.get("/health", (_req: Request, res: Response) => {
-  res.status(200).json({ status: "ok" });
+  res.status(200).json({ status: "ok", falkordb: isFalkorAvailable() });
+});
+
+// ─── Fallbacks ───────────────────────────────────────────────────────────────
+
+app.use("/api", (_req: Request, res: Response) => {
+  res.status(404).json({ error: "Not found", code: "NOT_FOUND" });
+});
+
+// Body-parser errors (malformed JSON, payload too large) → JSON instead of an HTML page.
+app.use((err: unknown, _req: Request, res: Response, next: NextFunction) => {
+  if (res.headersSent) return next(err);
+  const e = err as { status?: number; type?: string; message?: string };
+  if (e?.type === "entity.too.large") {
+    return res.status(413).json({ error: "Payload too large", code: "INVALID_CONFIG" });
+  }
+  if (e?.status && e.status >= 400 && e.status < 500) {
+    return res.status(e.status).json({ error: e.message || "Bad request", code: "INVALID_CONFIG" });
+  }
+  return sendError(res, err);
 });
 
 export default app;

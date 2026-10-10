@@ -7,7 +7,6 @@ import {
   generateQuestion,
   generateMCQ,
   generateTrueFalse,
-  generateScenario,
   gradeMCQOrTF,
   QuestionGenerationError,
 } from "../src/services/question-generator";
@@ -86,15 +85,16 @@ describe("Question Types", () => {
       expect(q.correctAnswer).to.equal("true");
     });
 
-    it("dispatches 'scenario' to generateScenario", async () => {
+    it("falls back to an open question for the retired 'scenario' type", async () => {
       stubLLM({
         question: "Given scenario X, what would you do?",
         targetConcept: "c1",
         bloomLevel: "Analyze",
         difficulty: 1,
       });
-      const q = await generateQuestion(1, "content", 1, [], "scenario");
-      expect(q.type).to.equal("scenario");
+      const q = await generateQuestion(1, "content", 1, [], "scenario" as any);
+      expect(q.type).to.equal("open");
+      expect(q.question).to.contain("scenario X");
     });
   });
 
@@ -159,21 +159,6 @@ describe("Question Types", () => {
 
       const q = await generateTrueFalse(1, "content", 0, []);
       expect(q.correctAnswer).to.equal("false");
-    });
-  });
-
-  describe("Scenario generation", () => {
-    it("generates scenario with type='scenario'", async () => {
-      stubLLM({
-        question: "Imagine you are debugging a production issue...",
-        targetConcept: "debugging",
-        bloomLevel: "Analyze",
-        difficulty: 1.5,
-      });
-
-      const q = await generateScenario(1, "Dev content", 1.5, []);
-      expect(q.type).to.equal("scenario");
-      expect(q.question).to.contain("debugging");
     });
   });
 

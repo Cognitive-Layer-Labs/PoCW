@@ -50,10 +50,8 @@ export type {
   VerifyQuestion,
   AnswerFeedback,
   ScoreBreakdown,
-  AttestationResult,
-  OnchainAttestation,
-  OffchainAttestation,
-  ChainConfig,
+  ConceptOutcome,
+  CognitiveProfile,
   QuestionType,
   PoCWError,
   PoCWErrorCode,
@@ -131,10 +129,12 @@ class PoCW {
 
   /**
    * Index content for later verification.
+   * `source` is an http(s) URL, or raw text. Pass `{ asText: true }` to force raw-text
+   * handling (e.g. for uploaded files) so the body is never interpreted as a URL.
    * Returns immediately — indexing happens in the background.
    * Idempotent: calling with the same source returns the existing entry.
    */
-  async index(source: string): Promise<IndexResult> {
+  async index(source: string, options?: { asText?: boolean }): Promise<IndexResult> {
     this.ensureInit();
 
     const knowledgeId = computeKnowledgeId(source);
@@ -150,7 +150,7 @@ class PoCW {
 
         await markIndexing(knowledgeId);
 
-        const job = this.runIndexing(knowledgeId, retrySource, retryContentId);
+        const job = this.runIndexing(knowledgeId, retrySource, retryContentId, existing.content_type);
         indexingJobs.set(knowledgeId, job);
         job.finally(() => indexingJobs.delete(knowledgeId));
 
@@ -166,14 +166,14 @@ class PoCW {
     }
 
     // Determine content type
-    const contentType = detectContentType(source);
+    const contentType = options?.asText ? "raw_text" : detectContentType(source);
 
     // Insert as pending
     await insertContent(knowledgeId, contentType, source, numericId);
     await markIndexing(knowledgeId);
 
     // Start background indexing
-    const job = this.runIndexing(knowledgeId, source, numericId);
+    const job = this.runIndexing(knowledgeId, source, numericId, contentType);
     indexingJobs.set(knowledgeId, job);
     job.finally(() => indexingJobs.delete(knowledgeId));
 
@@ -272,7 +272,7 @@ class PoCW {
     }
 
     // Get cached chunks or re-parse
-    const { chunks } = await this.getContentChunks(knowledgeId, row.source);
+    const { chunks } = await this.getContentChunks(knowledgeId);
     const contentId = row.content_id!;
 
     // Track usage
@@ -312,7 +312,7 @@ class PoCW {
 
   /**
    * Cascade-delete a resource: removes its FalkorDB graph, its content-store row, and the
-   * cached chunks. On-chain SBTs and earned attestations are intentionally preserved.
+   * cached chunks.
    */
   async deleteResource(
     knowledgeId: string
@@ -347,7 +347,7 @@ class PoCW {
     contentCache.delete(knowledgeId);
     await markIndexing(knowledgeId);
 
-    const job = this.runIndexing(knowledgeId, row.source, contentId);
+    const job = this.runIndexing(knowledgeId, row.source, contentId, row.content_type);
     indexingJobs.set(knowledgeId, job);
     job.finally(() => indexingJobs.delete(knowledgeId));
 
@@ -356,7 +356,7 @@ class PoCW {
 
   /**
    * Wipe ALL resources: clears every FalkorDB graph and every content-store row, and empties
-   * the content cache. Attestations are preserved. Returns counts removed.
+   * the content cache. Returns counts removed.
    */
   async wipeAll(): Promise<{ contentRemoved: number; nodesRemoved: number }> {
     this.ensureInit();
@@ -380,10 +380,10 @@ class PoCW {
   private async runIndexing(
     knowledgeId: string,
     source: string,
-    contentId: number
+    contentId: number,
+    contentType: string
   ): Promise<void> {
     try {
-      const contentType = detectContentType(source);
       let text: string;
       let htmlTitle: string | null = null;
 
@@ -433,17 +433,22 @@ class PoCW {
     }
   }
 
-  private async getContentChunks(
-    knowledgeId: string,
-    source: string
-  ): Promise<{ text: string; chunks: string[] }> {
+  /**
+   * Text chunks for an indexed resource (cached; re-parsed from the source after a restart).
+   * Used by the HTTP layer to rehydrate sessions loaded from Redis.
+   */
+  async getContentChunks(knowledgeId: string): Promise<{ text: string; chunks: string[] }> {
     const cached = contentCache.get(knowledgeId);
     if (cached) return cached;
 
+    const row = getContent(knowledgeId);
+    if (!row) {
+      throw new PoCWError("CONTENT_NOT_FOUND", `No content for knowledge ID: ${knowledgeId}`);
+    }
     // Re-parse if not cached (e.g., after restart)
-    const text = detectContentType(source) === "raw_text"
-      ? source
-      : await parseContentToText(source);
+    const text = row.content_type === "raw_text"
+      ? row.source
+      : await parseContentToText(row.source);
     const chunks = chunkText(text);
     contentCache.set(knowledgeId, { text, chunks });
     return { text, chunks };
@@ -485,10 +490,12 @@ function normalizeSource(source: string): string {
   return source;
 }
 
+/** Only http(s) URLs are fetched; anything else (including "word: ..." text) is raw text. */
 function detectContentType(source: string): string {
-  if (source.startsWith("ipfs://")) return "cid";
+  const trimmed = source.trim();
+  if (!/^https?:\/\//i.test(trimmed) || /\s/.test(trimmed)) return "raw_text";
   try {
-    new URL(source);
+    new URL(trimmed);
     return "url";
   } catch {
     return "raw_text";
@@ -597,15 +604,12 @@ function validateConfig(config?: PoCWConfig): void {
     }
   }
   if (config.q_types) {
-    const valid = ["open", "mcq", "true_false", "scenario"];
+    const valid = ["open", "mcq", "true_false"];
     for (const t of config.q_types) {
       if (!valid.includes(t)) {
         throw new PoCWError("INVALID_CONFIG", `Unknown question type: ${t}`);
       }
     }
-  }
-  if (config.attest === "onchain" && !config.chain) {
-    throw new PoCWError("INVALID_CONFIG", "chain config required for on-chain attestation");
   }
 }
 

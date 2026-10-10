@@ -20,9 +20,7 @@ import {
   ConceptMastery,
   ConceptMasteryMap,
   BloomCoverage,
-  IMPORTANT_CONCEPT_THRESHOLD,
   MIN_IMPORTANT_CONCEPTS,
-  BLOOM_WEIGHTS,
 } from "../services/irt-engine";
 import { getImportantConcepts } from "../services/kg-store";
 import {
@@ -33,15 +31,6 @@ import {
   GradeResult,
 } from "../services/question-generator";
 import { selectChunkIndex } from "../services/session-manager";
-import {
-  buildDataUri,
-  buildErc1155Metadata,
-  saveCognitiveProfile,
-  CognitiveProfile,
-} from "../services/metadata-store";
-import { parseEther } from "ethers";
-import { buildAttestation } from "./attestation";
-import { getOracleAddress } from "../services/signer";
 import { getContent } from "./content-store";
 import {
   ResolvedConfig,
@@ -50,6 +39,7 @@ import {
   AnswerFeedback,
   PoCWResult,
   ScoreBreakdown,
+  ConceptOutcome,
   GenerationOpts,
   PoCWError,
   POCW_DISCLAIMERS,
@@ -66,6 +56,8 @@ interface QuestionEntry {
   difficulty: number;
   bloomLevel: string;
   targetConcept: string;
+  /** KG concept id this question was tied to (null when unknown). Absent in pre-upgrade snapshots. */
+  conceptId?: string | null;
   userAnswer?: string;
   score?: number;
   correct?: boolean;
@@ -87,7 +79,8 @@ export interface SessionSnapshot {
   irtState: { theta: number; se: number; converged: boolean; responses: IRTResponse[] };
   questionHistory: Array<{
     question: string; type: QuestionType; difficulty: number; bloomLevel: string;
-    targetConcept: string; userAnswer?: string; score?: number; correct?: boolean; reasoning?: string;
+    targetConcept: string; conceptId?: string | null;
+    userAnswer?: string; score?: number; correct?: boolean; reasoning?: string;
   }>;
   currentQuestion: {
     question: string; targetConcept: string; bloomLevel: string; difficulty: number;
@@ -97,6 +90,8 @@ export interface SessionSnapshot {
   currentChunkIndex: number;
   targetDifficulties: number[];
   complete: boolean;
+  /** Final result, frozen on first getResult() so repeated fetches are identical. */
+  result?: PoCWResult | null;
 }
 
 export class VerifySession {
@@ -116,13 +111,14 @@ export class VerifySession {
   private conceptMastery: ConceptMasteryMap = new Map();
   /** Effective max questions — raised to importantConceptCount after init(). */
   private _maxQuestions: number;
-  private bloomCoverage: BloomCoverage = {}; // kept for snapshot compat
+  private bloomCoverage: BloomCoverage = {};
   private questionHistory: QuestionEntry[] = [];
   private _currentQuestion: GeneratedQuestion | null = null;
   private _currentChunkIndex: number = 0;
   private targetDifficulties: number[] = [];
   private _currentTarget: { conceptId: string | null; edgeDirection: 'direct' | 'incoming' | 'outgoing' } = { conceptId: null, edgeDirection: 'direct' };
   private _complete: boolean = false;
+  private _result: PoCWResult | null = null;
 
   constructor(
     contentId: number,
@@ -271,6 +267,7 @@ export class VerifySession {
       difficulty: currentQ.difficulty,
       bloomLevel: currentQ.bloomLevel,
       targetConcept: currentQ.targetConcept,
+      conceptId: targetConceptId ?? this.resolveConceptIdByLabel(currentQ.targetConcept),
       userAnswer: answer,
       score: gradeResult.score,
       correct: gradeResult.correct,
@@ -278,7 +275,7 @@ export class VerifySession {
     };
     this.questionHistory.push(entry);
 
-    // Bloom coverage (kept for cognitive profile)
+    // Bloom coverage (part of the result profile)
     const bl = currentQ.bloomLevel;
     this.bloomCoverage[bl] = (this.bloomCoverage[bl] ?? 0) + 1;
 
@@ -342,96 +339,35 @@ export class VerifySession {
     };
   }
 
-  /** Get the final result. Only callable after session is complete. */
+  /** Is the session complete (all questions answered)? */
+  isComplete(): boolean {
+    return this._complete;
+  }
+
+  /**
+   * Get the final result. Only callable after session is complete.
+   * The result is computed once and then frozen (stable across repeated calls/snapshots).
+   */
   async getResult(): Promise<PoCWResult> {
     if (!this._complete) {
       throw new PoCWError("SESSION_NOT_ACTIVE", "Session has not completed yet");
     }
+    if (!this._result) this._result = this.computeResult();
+    return this._result;
+  }
+
+  private computeResult(): PoCWResult {
 
     const score = thetaToScore(this.irtState.theta);
     const competenceIndicator = score >= this.config.threshold * 100;
-    const passed = competenceIndicator;
     const timestamp = new Date().toISOString();
 
     // Confidence interval: theta ± 1.96*SE mapped to 0-100
     const ciLow = thetaToScore(this.irtState.theta - 1.96 * this.irtState.se);
     const ciHigh = thetaToScore(this.irtState.theta + 1.96 * this.irtState.se);
 
-    // Convergence: IRT estimate stable (SE < 0.40, matching SE_THRESHOLD).
-    const converged = this.irtState.se < 0.40;
-    // Person-fit flag: annotate when response pattern is potentially aberrant.
-    const aberrant = isAberrant(this.irtState);
-
-    // Question types used (deduplicated)
-    const questionTypes = [...new Set(this.questionHistory.map(q => q.type))];
-
     // Look up content metadata from SQLite
     const contentRow = getContent(this.knowledgeId);
-    const title = contentRow?.title || `PoCW #${this.contentId}`;
-    const source = contentRow?.source || this.knowledgeId;
-
-    const bloomLevelsReached = [...new Set(
-      this.questionHistory.filter(q => q.correct).map(q => q.bloomLevel)
-    )];
-
-    const cognitiveProfile: CognitiveProfile = {
-      theta: this.irtState.theta,
-      se: this.irtState.se,
-      score,
-      questionCount: this.questionHistory.length,
-      bloomLevelsReached,
-      bloomCoverage: this.bloomCoverage,
-      aberrant,
-      passed,
-      converged,
-      confidenceInterval: [ciLow, ciHigh],
-      questionTypes,
-      title,
-      source,
-      oracleAddress: getOracleAddress(),
-      scoreBreakdown: this.questionHistory.map(q => ({
-        question: q.question,
-        userAnswer: q.userAnswer ?? "",
-        score: q.score || 0,
-        difficulty: q.difficulty,
-        bloomLevel: q.bloomLevel,
-        correct: q.correct || false,
-        reasoning: q.reasoning ?? "",
-      })),
-      contentUrl: this.knowledgeId,
-      contentId: this.contentId,
-      userAddress: this.subject,
-      timestamp,
-    };
-
-    // Step 1: Build ERC-1155 metadata and encode as base64 data URI.
-    //         The data URI is stored on-chain — no external storage needed.
-    const erc1155Metadata = buildErc1155Metadata(cognitiveProfile);
-    const { dataUri: tokenUri, cid: contentHash } = buildDataUri(erc1155Metadata);
-
-    // Step 2: Save cognitive profile locally for off-chain provenance (best-effort).
-    try {
-      saveCognitiveProfile(cognitiveProfile);
-    } catch (err) {
-      console.warn("[verify-session] cognitive profile save failed:", err);
-    }
-
-    // KAL reward (100% to the learner) — computed BEFORE signing so it is bound into the
-    // attestation; the controller mints exactly this amount in verifyAndMint.
-    const kalAmount = passed ? calculateKAL(cognitiveProfile.scoreBreakdown) : 0;
-    const kalAmountWei = kalAmount > 0 ? parseEther(kalAmount.toFixed(18)).toString() : "0";
-
-    // Step 3: Sign the attestation with the tokenUri + kalAmount included in the payload.
-    const attestation = await buildAttestation(
-      this.config.attest,
-      this.subject,
-      this.contentId,
-      score,
-      kalAmountWei,
-      tokenUri,
-      contentHash,
-      this.config.chain
-    );
 
     // Build detailed breakdown if requested
     let response_detail: ScoreBreakdown[] | undefined;
@@ -443,6 +379,7 @@ export class VerifySession {
         difficulty: q.difficulty,
         bloomLevel: q.bloomLevel,
         correct: q.correct || false,
+        conceptId: this.conceptIdOf(q),
       }));
     }
 
@@ -455,15 +392,71 @@ export class VerifySession {
       confidence_interval: [ciLow, ciHigh],
       questions_asked: this.questionHistory.length,
       response_detail,
-      attestation,
+      concepts: this.buildConceptOutcomes(),
+      profile: {
+        title: contentRow?.title || `PoCW #${this.contentId}`,
+        source: contentRow?.source || this.knowledgeId,
+        bloomLevelsReached: [...new Set(
+          this.questionHistory.filter(q => q.correct).map(q => q.bloomLevel)
+        )],
+        bloomCoverage: { ...this.bloomCoverage },
+        aberrant: isAberrant(this.irtState),
+        questionTypes: [...new Set(this.questionHistory.map(q => q.type))],
+      },
       knowledgeId: this.knowledgeId,
       contentId: this.contentId,
       subject: this.subject,
       timestamp,
-      tokenUri,
-      kalAmount: kalAmount > 0 ? kalAmount : undefined,
       disclaimers: POCW_DISCLAIMERS,
     };
+  }
+
+  /**
+   * Per-concept outcomes for every important concept tracked by the mastery loop
+   * (label from the KG node), in importance order. Counts come from the question history.
+   */
+  private buildConceptOutcomes(): ConceptOutcome[] {
+    const stats = new Map<string, { asked: number; correct: number }>();
+    for (const q of this.questionHistory) {
+      const id = this.conceptIdOf(q);
+      if (!id) continue;
+      const s = stats.get(id) ?? { asked: 0, correct: 0 };
+      s.asked++;
+      if (q.correct) s.correct++;
+      stats.set(id, s);
+    }
+    return [...this.conceptMastery.values()]
+      .sort((x, y) => y.importance - x.importance)
+      .map(cm => {
+        const s = stats.get(cm.conceptId) ?? { asked: 0, correct: 0 };
+        return {
+          id: cm.conceptId,
+          label: cm.label,
+          asked: s.asked,
+          correct: s.correct,
+          mastered: cm.status === "mastered",
+        };
+      });
+  }
+
+  /** Concept id for a history entry (falls back to label matching for older snapshots). */
+  private conceptIdOf(q: QuestionEntry): string | null {
+    if (q.conceptId !== undefined) return q.conceptId;
+    return this.resolveConceptIdByLabel(q.targetConcept);
+  }
+
+  /**
+   * Map an LLM-reported target concept (label or id) to a tracked KG concept id.
+   * Used when the question was not explicitly targeted (Fisher-information mode).
+   */
+  private resolveConceptIdByLabel(target: string | undefined): string | null {
+    if (!target) return null;
+    if (this.conceptMastery.has(target)) return target;
+    const norm = target.trim().toLowerCase();
+    for (const cm of this.conceptMastery.values()) {
+      if (cm.label.trim().toLowerCase() === norm) return cm.conceptId;
+    }
+    return null;
   }
 
   /**
@@ -499,6 +492,7 @@ export class VerifySession {
       currentChunkIndex: this._currentChunkIndex,
       targetDifficulties: this.targetDifficulties,
       complete: this._complete,
+      result: this._result,
     };
   }
 
@@ -522,6 +516,7 @@ export class VerifySession {
     (session as any)._currentChunkIndex = snap.currentChunkIndex;
     (session as any).targetDifficulties = snap.targetDifficulties;
     (session as any)._complete = snap.complete;
+    (session as any)._result = snap.result ?? null;
     return session;
   }
 
@@ -529,25 +524,4 @@ export class VerifySession {
   rehydrateChunks(chunks: string[]): void {
     (this as any).chunks = chunks;
   }
-}
-
-// ─── KAL calculation ─────────────────────────────────────────────────────────
-
-const BASE_KAL = 100;
-const DEFAULT_M  = 1.0;
-
-function calculateKAL(
-  breakdown: Array<{ score: number; bloomLevel: string }>,
-  M: number = DEFAULT_M
-): number {
-  let numerator   = 0;
-  let denominator = 0;
-  for (const q of breakdown) {
-    const w = BLOOM_WEIGHTS[q.bloomLevel] ?? 0.25;
-    numerator   += q.score * w;
-    denominator += 100    * w;
-  }
-  if (denominator === 0) return 0;
-  const normalised = numerator / denominator;
-  return Math.round(BASE_KAL * M * normalised * 100) / 100;
 }
