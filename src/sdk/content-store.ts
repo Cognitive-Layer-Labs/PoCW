@@ -34,15 +34,13 @@ CREATE TABLE IF NOT EXISTS content_index (
 );
 `;
 
-// Migration: add title/description columns if they don't exist
-const ADD_TITLE_DESC = `
-ALTER TABLE content_index ADD COLUMN title TEXT;
-ALTER TABLE content_index ADD COLUMN description TEXT;
-`;
-
-// Migration: add the visibility column if it doesn't exist.
+// Migrations: columns added after the first schema version, added when missing.
 // (Databases created by older versions may carry extra legacy columns; they are ignored.)
-const ADD_HIDDEN_COLUMN = "ALTER TABLE content_index ADD COLUMN hidden INTEGER DEFAULT 0";
+const ADDED_COLUMNS: Array<[string, string]> = [
+  ["title", "TEXT"],
+  ["description", "TEXT"],
+  ["hidden", "INTEGER DEFAULT 0"],
+];
 
 // Columns exposed as ContentRow. Selected explicitly so legacy columns present in databases
 // created by older versions never leak into API responses.
@@ -80,18 +78,11 @@ export function initContentStore(
   db.pragma("journal_mode = WAL");
   db.exec(CREATE_TABLE);
 
-  // Add title/description columns if they don't exist (idempotent)
-  try {
-    db.exec(ADD_TITLE_DESC);
-  } catch {
-    // Columns already exist — ignore
-  }
-
-  // Add visibility column if it doesn't exist (idempotent)
-  try {
-    db.exec(ADD_HIDDEN_COLUMN);
-  } catch {
-    // Column already exists — ignore
+  const existing = new Set(
+    (db.prepare("PRAGMA table_info(content_index)").all() as Array<{ name: string }>).map(c => c.name)
+  );
+  for (const [name, type] of ADDED_COLUMNS) {
+    if (!existing.has(name)) db.exec(`ALTER TABLE content_index ADD COLUMN ${name} ${type}`);
   }
 }
 

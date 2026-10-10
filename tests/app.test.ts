@@ -3,6 +3,7 @@ import type { AddressInfo } from "net";
 import type { Server } from "http";
 import app, { parseTrustProxy, setPoCWInstance } from "../src/app";
 import { PoCWError } from "../src/sdk/types";
+import { validateConfig } from "../src/sdk/index";
 
 /**
  * HTTP-layer tests (no FalkorDB/Redis): auth, admin gating, rate limiting, input validation.
@@ -135,6 +136,17 @@ describe("HTTP API", function () {
   it("POST /api/verify validates knowledgeId and subject types", async () => {
     expect((await post("/api/verify", {})).status).to.equal(400);
     expect((await post("/api/verify", { knowledgeId: "k", subject: 42 })).status).to.equal(400);
+    expect((await post("/api/verify", { knowledgeId: "k", config: [1] })).status).to.equal(400);
+  });
+
+  it("rejects verify configs with wrong types or out-of-range values", () => {
+    for (const config of [
+      { max_questions: "9" }, { max_questions: 2.5 }, { threshold: "0.5" }, { q_types: "open" },
+      { q_types: [] }, { response: "verbose" }, { difficulty_preset: "insane" }, { model: 123 },
+    ]) {
+      expect(() => validateConfig(config as any), JSON.stringify(config)).to.throw(PoCWError);
+    }
+    expect(() => validateConfig({ max_questions: 5, q_types: ["mcq"], threshold: 0.6, response: "detailed" })).not.to.throw();
   });
 
   it("returns JSON 404 for unknown API routes and JSON 400 for malformed JSON", async () => {

@@ -585,30 +585,46 @@ async function extractMetadata(
   return { title, description };
 }
 
-function validateConfig(config?: PoCWConfig): void {
+/** Validate caller-supplied verify config (types and ranges). Throws INVALID_CONFIG. */
+export function validateConfig(config?: PoCWConfig): void {
   if (!config) return;
+  const fail = (msg: string): never => { throw new PoCWError("INVALID_CONFIG", msg); };
+  const isNum = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 
   if (config.max_questions !== undefined) {
-    if (config.max_questions < 1 || config.max_questions > 50) {
-      throw new PoCWError("INVALID_CONFIG", "max_questions must be between 1 and 50");
+    if (!Number.isInteger(config.max_questions) || config.max_questions < 1 || config.max_questions > 50) {
+      fail("max_questions must be an integer between 1 and 50");
     }
   }
   if (config.difficulty !== undefined) {
-    if (config.difficulty < 0 || config.difficulty > 1) {
-      throw new PoCWError("INVALID_CONFIG", "difficulty must be between 0 and 1");
+    if (!isNum(config.difficulty) || config.difficulty < 0 || config.difficulty > 1) {
+      fail("difficulty must be a number between 0 and 1");
     }
   }
   if (config.threshold !== undefined) {
-    if (config.threshold < 0 || config.threshold > 1) {
-      throw new PoCWError("INVALID_CONFIG", "threshold must be between 0 and 1");
+    if (!isNum(config.threshold) || config.threshold < 0 || config.threshold > 1) {
+      fail("threshold must be a number between 0 and 1");
     }
   }
-  if (config.q_types) {
+  if (config.difficulty_preset !== undefined && !["easy", "medium", "hard"].includes(config.difficulty_preset)) {
+    fail("difficulty_preset must be one of: easy, medium, hard");
+  }
+  if (config.response !== undefined && !["boolean", "score", "detailed"].includes(config.response)) {
+    fail("response must be one of: boolean, score, detailed");
+  }
+  if (config.q_types !== undefined) {
+    if (!Array.isArray(config.q_types) || config.q_types.length === 0) {
+      fail("q_types must be a non-empty array");
+    }
     const valid = ["open", "mcq", "true_false"];
     for (const t of config.q_types) {
-      if (!valid.includes(t)) {
-        throw new PoCWError("INVALID_CONFIG", `Unknown question type: ${t}`);
-      }
+      if (!valid.includes(t)) fail(`Unknown question type: ${t}`);
+    }
+  }
+  for (const key of ["model", "language", "persona"] as const) {
+    const v = config[key];
+    if (v !== undefined && (typeof v !== "string" || v.length > 200)) {
+      fail(`${key} must be a string (max 200 characters)`);
     }
   }
 }

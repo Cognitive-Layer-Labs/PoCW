@@ -270,6 +270,24 @@ describe("VerifySession", () => {
     expect(await restored.getResult()).to.deep.equal(JSON.parse(JSON.stringify(r1)));
   });
 
+  it("an active session survives a snapshot round-trip (maxQuestions, se, current question)", async () => {
+    stubLLMSequence([openQuestion]);
+    const config = resolveConfig({ max_questions: 2, q_types: ["open"] });
+    const session = new VerifySession(1, "kid1", chunks, "user1", config);
+    await session.init();
+    const snap = JSON.parse(JSON.stringify(session.toSnapshot()));
+    const restored = VerifySession.fromSnapshot(snap);
+    expect(restored.maxQuestions).to.equal(session.maxQuestions);
+    expect(restored.currentQuestion).to.deep.equal(session.currentQuestion);
+    expect(restored.isActive()).to.be.true;
+    expect(JSON.parse(JSON.stringify(restored.toSnapshot()))).to.deep.equal(snap);
+    expect((restored as unknown as { irtState: { se: number } }).irtState.se).to.equal(Infinity);
+
+    // Snapshots written before maxQuestions was persisted fall back to the config bounds.
+    delete snap.maxQuestions;
+    expect(VerifySession.fromSnapshot(snap).maxQuestions).to.equal(2);
+  });
+
   describe("per-concept outcomes", () => {
     /** Route stubbed LLM calls by purpose: generation, quality-eval (always pass), grading. */
     function stubLLMByRole(questions: object[], grades: object[]) {

@@ -37,13 +37,3 @@ export async function loadSession(sessionId: string): Promise<VerifySession | un
   const snap: SessionSnapshot = JSON.parse(raw);
   return VerifySession.fromSnapshot(snap);
 }
-
-export async function deleteSession(sessionId: string): Promise<void> {
-  if (!redis) throw new Error("Session store not initialized");
-  await redis.del(`pocw:session:${sessionId}`);
-}
-
-export async function touchSession(sessionId: string): Promise<void> {
-  if (!redis) throw new Error("Session store not initialized");
-  await redis.expire(`pocw:session:${sessionId}`, SESSION_TTL);
-}

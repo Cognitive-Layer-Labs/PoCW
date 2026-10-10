@@ -18,7 +18,8 @@ export interface PoCWConfig {
    *   hard   → difficulty 0.65, threshold 0.65
    */
   difficulty_preset?: "easy" | "medium" | "hard";
-  /** Starting difficulty 0-1. Default: 0.5. Maps to IRT b = (val*6)-3 */
+  /** Difficulty 0-1. Default: 0.5. Accepted and validated but currently unused: the session
+   *  starts at theta 0 and adapts from there (item difficulty comes from the concept loop). */
   difficulty?: number;
   /** Question types to use. Default: ["open"] */
   q_types?: QuestionType[];
@@ -88,11 +89,6 @@ export function resolveConfig(config?: PoCWConfig): ResolvedConfig {
     language: config?.language,
     persona: config?.persona,
   };
-}
-
-/** Map 0-1 config difficulty to IRT b parameter (-3 to 3) */
-export function configDifficultyToIRT(d: number): number {
-  return Math.max(-3, Math.min(3, d * 6 - 3));
 }
 
 // ─── PoCW Init Config ────────────────────────────────────────────────────────

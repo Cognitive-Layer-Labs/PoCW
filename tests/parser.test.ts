@@ -338,5 +338,9 @@ describe("SSRF protection", function () {
     expect(isPrivateAddress("172.31.255.255")).to.be.true;
     expect(isPrivateAddress("fe80::1%eth0")).to.be.true;
     expect(isPrivateAddress("not-an-ip")).to.be.true;
+    // IPv4 embedded in IPv6 (mapped, compatible, translated, NAT64) and other non-public v6.
+    for (const ip of ["::ffff:127.0.0.1", "::127.0.0.1", "::ffff:0:7f00:1", "64:ff9b::a00:1", "fec0::1", "2001::1"]) {
+      expect(isPrivateAddress(ip), ip).to.be.true;
+    }
   });
 });

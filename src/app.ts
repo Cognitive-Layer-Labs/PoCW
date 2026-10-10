@@ -147,6 +147,8 @@ function getPoCW(): PoCW {
 const SESSION_CACHE_IDLE_MS = 30 * 60_000;
 const SESSION_CACHE_MAX = 1000;
 const verifySessions = new Map<string, { session: VerifySession; lastUsed: number }>();
+/** Session ids with an answer currently being graded (see POST /api/verify/:id/answer). */
+const answersInFlight = new Set<string>();
 
 function cacheSession(session: VerifySession): void {
   verifySessions.delete(session.sessionId);
@@ -456,8 +458,18 @@ app.post("/api/verify/:sessionId/answer", async (req: Request, res: Response) =>
     });
   }
 
+  // One answer per session at a time: a double-submit would otherwise grade twice and
+  // advance the session past a question the learner never saw.
+  const sessionId = req.params.sessionId;
+  if (answersInFlight.has(sessionId)) {
+    return res.status(409).json({
+      error: "An answer for this session is already being processed",
+      code: "SESSION_BUSY",
+    });
+  }
+  answersInFlight.add(sessionId);
   try {
-    const session = await getSession(req.params.sessionId);
+    const session = await getSession(sessionId);
     if (!session) {
       return res.status(404).json({ error: "Session not found", code: "SESSION_EXPIRED" });
     }
@@ -469,7 +481,12 @@ app.post("/api/verify/:sessionId/answer", async (req: Request, res: Response) =>
     }
     return res.json(payload);
   } catch (err) {
+    // submitAnswer mutates the session before it can fail (e.g. next-question generation);
+    // drop the local copy so a retry starts again from the last state saved in Redis.
+    verifySessions.delete(sessionId);
     return sendError(res, err);
+  } finally {
+    answersInFlight.delete(sessionId);
   }
 });
 

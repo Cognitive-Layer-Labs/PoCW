@@ -188,7 +188,8 @@ Open questions return `dimensions: { covered_points, total_points, precision_cap
 `nextQuestion` is absent — fetch the result.
 
 Errors: `404` `SESSION_EXPIRED` (unknown/expired session), `409` `SESSION_NOT_ACTIVE` (already
-complete), `503` `LLM_ERROR` (generation/grading failed — retry the same answer).
+complete), `409` `SESSION_BUSY` (another answer for this session is still being graded — one at a
+time), `503` `LLM_ERROR` (generation/grading failed — the answer was not recorded; retry the same answer).
 
 ---
 
@@ -327,15 +328,16 @@ await pocw.close();
 
 ```ts
 interface PoCWConfig {
-  max_questions?: number;            // 1–50, default 10 (raised to #important concepts, capped)
+  max_questions?: number;            // integer 1–50, default 10 (raised to #important concepts, capped)
   difficulty_preset?: "easy" | "medium" | "hard"; // overrides difficulty/threshold/max_questions
-  difficulty?: number;               // 0–1, default 0.5
-  q_types?: ("open" | "mcq" | "true_false")[];   // default all three (type chosen by target difficulty)
+  difficulty?: number;               // 0–1, default 0.5 — accepted but currently unused (θ starts at 0)
+  q_types?: ("open" | "mcq" | "true_false")[];   // non-empty; default all three (type chosen by target difficulty)
   threshold?: number;                // 0–1, default 0.7 → competenceIndicator when score ≥ 70
   response?: "boolean" | "score" | "detailed";   // "detailed" adds response_detail
   model?: string;                    // OpenRouter model override for generation/grading
   language?: string;                 // question language (default: content language)
   persona?: string;                  // framing, e.g. "explain to a 12-year-old"
+  // model / language / persona: strings of at most 200 characters. Wrong types → 400 INVALID_CONFIG.
   onQuestion?: (q: VerifyQuestion) => Promise<string>; // SDK callback mode only
 }
 ```
@@ -416,6 +418,7 @@ interface PoCWResult {
 | `INVALID_CONFIG` | 400 | Invalid input or configuration (also 413/415 for upload limits) |
 | `SESSION_EXPIRED` | 404 / 410 | Session unknown or expired |
 | `SESSION_NOT_ACTIVE` | 409 | Session already complete / not complete yet |
+| `SESSION_BUSY` | 409 | An answer for this session is already being processed |
 | `LLM_ERROR` | 503 | LLM call failed (retry) |
 | `GRAPH_DB_ERROR` | 503 | FalkorDB unavailable |
 | `CAPACITY_EXCEEDED` | 429 | Rate limit |

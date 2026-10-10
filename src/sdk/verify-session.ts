@@ -43,7 +43,6 @@ import {
   GenerationOpts,
   PoCWError,
   POCW_DISCLAIMERS,
-  configDifficultyToIRT,
 } from "./types";
 
 /** Fixed 4PL upper asymptote: P(correct) reaches 1.0 at high ability (keeps the
@@ -89,6 +88,8 @@ export interface SessionSnapshot {
   } | null;
   currentChunkIndex: number;
   targetDifficulties: number[];
+  /** Effective question cap after init() (absent in pre-upgrade snapshots). */
+  maxQuestions?: number;
   complete: boolean;
   /** Final result, frozen on first getResult() so repeated fetches are identical. */
   result?: PoCWResult | null;
@@ -491,6 +492,7 @@ export class VerifySession {
       currentQuestion: this._currentQuestion,
       currentChunkIndex: this._currentChunkIndex,
       targetDifficulties: this.targetDifficulties,
+      maxQuestions: this._maxQuestions,
       complete: this._complete,
       result: this._result,
     };
@@ -510,11 +512,21 @@ export class VerifySession {
     (session as any).conceptMastery = new Map(snap.conceptMastery ?? []);
     (session as any)._currentTarget = snap.currentTarget ?? { conceptId: null, edgeDirection: 'direct' };
     (session as any).opts = { language: snap.config.language, persona: snap.config.persona, model: snap.config.model };
-    (session as any).irtState = snap.irtState;
+    // JSON turns the initial se (Infinity) into null — restore it.
+    (session as any).irtState = {
+      ...snap.irtState,
+      se: typeof snap.irtState.se === "number" ? snap.irtState.se : Infinity,
+    };
     (session as any).questionHistory = snap.questionHistory;
     (session as any)._currentQuestion = snap.currentQuestion;
     (session as any)._currentChunkIndex = snap.currentChunkIndex;
     (session as any).targetDifficulties = snap.targetDifficulties;
+    (session as any)._maxQuestions = typeof snap.maxQuestions === "number"
+      ? snap.maxQuestions
+      : Math.min(
+          Math.max(snap.config.max_questions, snap.conceptMastery?.length ?? 0),
+          snap.config.cap_questions,
+        );
     (session as any)._complete = snap.complete;
     (session as any)._result = snap.result ?? null;
     return session;

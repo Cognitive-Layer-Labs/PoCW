@@ -57,12 +57,15 @@ export async function initFalkorDB(
   }
 }
 
+let reconnectTimer: NodeJS.Timeout | null = null;
+
 function startFalkorReconnect(
   host: string,
   port: number,
   password: string | undefined,
   graphName: string
 ): void {
+  if (reconnectTimer) return; // one reconnect loop at a time
   const interval = setInterval(async () => {
     try {
       const resolvedPassword = password || process.env.FALKORDB_PASSWORD;
@@ -73,12 +76,14 @@ function startFalkorReconnect(
       graph = db.selectGraph(graphName);
       falkorAvailable = true;
       clearInterval(interval);
+      reconnectTimer = null;
       console.log("[kg-store] FalkorDB reconnected");
     } catch {
       // keep trying
     }
   }, 30_000);
   interval.unref();
+  reconnectTimer = interval;
 }
 
 /**

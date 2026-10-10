@@ -64,15 +64,18 @@ const V4_BLOCKED: Array<[string, number]> = [
   ["240.0.0.0", 4],      // reserved + broadcast
 ];
 const V6_BLOCKED: Array<[string, number]> = [
-  ["::", 128],           // unspecified
-  ["::1", 128],          // loopback
+  ["::", 96],            // unspecified, loopback, IPv4-compatible (deprecated)
   ["::ffff:0:0", 96],    // IPv4-mapped
+  ["::ffff:0:0:0", 96],  // IPv4-translated
   ["64:ff9b::", 96],     // NAT64
+  ["64:ff9b:1::", 48],   // local-use NAT64
   ["100::", 64],         // discard
+  ["2001::", 23],        // IETF protocol assignments (Teredo, ORCHID, benchmarking, ...)
   ["2001:db8::", 32],    // documentation
   ["2002::", 16],        // 6to4 (can embed private IPv4)
   ["fc00::", 7],         // unique local
   ["fe80::", 10],        // link-local
+  ["fec0::", 10],        // site-local (deprecated)
   ["ff00::", 8],         // multicast
 ];
 for (const [addr, prefix] of V4_BLOCKED) blockListV4.addSubnet(addr, prefix, "ipv4");
@@ -245,6 +248,13 @@ function requestOnce(url: URL, opts: ResolvedOptions): Promise<RawResponse> {
         res.on("error", reject);
       }
     );
+    // Socket `timeout` is only an idle timeout; this bounds the whole request (slow-drip bodies).
+    const deadline = setTimeout(
+      () => req.destroy(new Error(`Request timed out after ${opts.timeoutMs} ms`)),
+      opts.timeoutMs
+    );
+    deadline.unref();
+    req.on("close", () => clearTimeout(deadline));
     req.on("timeout", () => req.destroy(new Error(`Request timed out after ${opts.timeoutMs} ms`)));
     req.on("error", reject);
     req.end();
