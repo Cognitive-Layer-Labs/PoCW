@@ -105,6 +105,7 @@ unreachable it starts in degraded mode (no graph extraction) and keeps retrying 
 | `POCW_API_KEY` | — | Bearer token for `/api/*`. Required when `NODE_ENV=production` |
 | `ADMIN_API_KEY` | — | Bearer token for `/api/admin/*`. Unset ⇒ admin API returns 403 |
 | `TRUST_PROXY` | off | Express `trust proxy`: hop count (`1`), `true`, or an address list |
+| `ALLOW_MODEL_OVERRIDE` | off | `true` lets HTTP callers pick the LLM via `config.model`; otherwise it is ignored |
 | `CORS_ORIGIN` | — | Only needed if browsers call the engine directly |
 | `PORT` | `3000` | HTTP port |
 | `POCW_DB_PATH` | `./data/pocw.db` | SQLite content index |

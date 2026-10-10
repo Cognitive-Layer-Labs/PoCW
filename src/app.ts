@@ -33,6 +33,7 @@ app.set("trust proxy", parseTrustProxy(process.env.TRUST_PROXY));
 // Browsers never call the engine directly in the standard deployment (the landing
 // proxies server-side), so CORS headers are only sent when CORS_ORIGIN is set.
 const CORS_ORIGIN = process.env.CORS_ORIGIN?.trim();
+const ALLOW_MODEL_OVERRIDE = process.env.ALLOW_MODEL_OVERRIDE === "true";
 if (CORS_ORIGIN) {
   app.use((req: Request, res: Response, next: NextFunction): void => {
     res.header("Access-Control-Allow-Origin", CORS_ORIGIN);
@@ -430,6 +431,8 @@ app.post("/api/verify", async (req: Request, res: Response) => {
     // Always session mode over HTTP (no onQuestion callback).
     const safeConfig = { ...(config || {}) };
     delete safeConfig.onQuestion;
+    // The LLM model decides cost; HTTP callers may only pick it when explicitly allowed.
+    if (!ALLOW_MODEL_OVERRIDE) delete safeConfig.model;
     const session = (await getPoCW().verify(knowledgeId, label, safeConfig)) as unknown as VerifySession;
     cacheSession(session);
     await saveSession(session);

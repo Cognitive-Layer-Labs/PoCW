@@ -30,6 +30,11 @@ describe("HTTP API", function () {
     async wipeAll() {
       return { contentRemoved: 0, nodesRemoved: 0 };
     },
+    lastVerifyConfig: undefined as Record<string, unknown> | undefined,
+    async verify(_id: string, _subject: string, config: Record<string, unknown>) {
+      fakePoCW.lastVerifyConfig = config;
+      throw new PoCWError("CONTENT_NOT_FOUND", "stop after capturing config");
+    },
   };
 
   before(async () => {
@@ -137,6 +142,15 @@ describe("HTTP API", function () {
     expect((await post("/api/verify", {})).status).to.equal(400);
     expect((await post("/api/verify", { knowledgeId: "k", subject: 42 })).status).to.equal(400);
     expect((await post("/api/verify", { knowledgeId: "k", config: [1] })).status).to.equal(400);
+  });
+
+  it("ignores a caller-chosen LLM model unless ALLOW_MODEL_OVERRIDE=true", async () => {
+    const res = await post("/api/verify", {
+      knowledgeId: "k",
+      config: { model: "some/expensive-model", max_questions: 5 },
+    });
+    expect(res.status).to.equal(404);
+    expect(fakePoCW.lastVerifyConfig).to.deep.equal({ max_questions: 5 });
   });
 
   it("rejects verify configs with wrong types or out-of-range values", () => {

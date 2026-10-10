@@ -334,7 +334,7 @@ interface PoCWConfig {
   q_types?: ("open" | "mcq" | "true_false")[];   // non-empty; default all three (type chosen by target difficulty)
   threshold?: number;                // 0–1, default 0.7 → competenceIndicator when score ≥ 70
   response?: "boolean" | "score" | "detailed";   // "detailed" adds response_detail
-  model?: string;                    // OpenRouter model override for generation/grading
+  model?: string;                    // OpenRouter model override (HTTP: ignored unless ALLOW_MODEL_OVERRIDE=true)
   language?: string;                 // question language (default: content language)
   persona?: string;                  // framing, e.g. "explain to a 12-year-old"
   // model / language / persona: strings of at most 200 characters. Wrong types → 400 INVALID_CONFIG.
