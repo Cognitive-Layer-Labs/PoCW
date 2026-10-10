@@ -4,6 +4,7 @@ import sinon from "sinon";
 import { __setGetConceptsByDifficultyForTest } from "../src/services/kg-store";
 import * as llmClient from "../src/services/llm-client";
 import { generateSingleQuestion, gradeAnswer, QuestionGenerationError, GradingError } from "../src/services/question-generator";
+import { isTooSimilar } from "../src/services/question-generation-agent";
 
 describe("Question Generator", () => {
   let openAIStub: any;
@@ -173,5 +174,24 @@ describe("Question Generator", () => {
         expect(err).to.be.instanceOf(GradingError);
       }
     });
+  });
+});
+
+describe("question dedup (isTooSimilar)", () => {
+  const previous = [
+    "What is the main function of chlorophyll in photosynthesis?",
+    "Which molecule is split during the light-dependent reactions?",
+  ];
+
+  it("does not flag genuinely different questions", () => {
+    // Regression: the Levenshtein *distance* ratio was compared as if it were a similarity,
+    // so unrelated questions (distance ≈ 0.8–0.9) were rejected and regenerated at high temperature.
+    expect(isTooSimilar("How does the Calvin cycle use ATP and NADPH?", previous)).to.be.false;
+    expect(isTooSimilar("Why do plants need carbon dioxide?", previous)).to.be.false;
+  });
+
+  it("flags near-duplicates", () => {
+    expect(isTooSimilar("What is the main function of chlorophyll during photosynthesis?", previous)).to.be.true;
+    expect(isTooSimilar(previous[1], previous)).to.be.true;
   });
 });

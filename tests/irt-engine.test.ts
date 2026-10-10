@@ -9,7 +9,11 @@ import {
   difficultyToBloom,
   bloomToDifficulty,
   thetaToScore,
-  IRT_CORRECT_THRESHOLD
+  IRT_CORRECT_THRESHOLD,
+  selectNextQuestion,
+  difficultyOffset,
+  anchorItemDifficulty,
+  ITEM_DIFFICULTY_MAX_DEVIATION,
 } from "../src/services/irt-engine";
 
 /** 4PL update with a=1, c=0, d=1 — reduces to the Rasch model these expectations are written for. */
@@ -257,5 +261,59 @@ describe("IRT Engine (4PL, Rasch-equivalent params)", () => {
     it("returns false for fresh state", () => {
       expect(isConverged(createIRTState())).to.be.false;
     });
+  });
+});
+
+describe("difficulty setting (config.difficulty → target offset)", () => {
+  const concepts = (...imps: number[]) => new Map(imps.map((importance, i) => [`c${i}`, {
+    conceptId: `c${i}`, label: `C${i}`, importance, status: "untested" as const, askCount: 0,
+  }]));
+
+  it("maps the UI presets to concrete offsets", () => {
+    expect(difficultyOffset(0.2)).to.be.closeTo(-1.2, 1e-9);   // easy
+    expect(difficultyOffset(0.4)).to.be.closeTo(-0.6, 1e-9);   // medium
+    expect(difficultyOffset(0.65)).to.be.closeTo(0.15, 1e-9);  // hard
+    expect(difficultyOffset(0.5)).to.be.closeTo(-0.3, 1e-9);   // SDK default
+    expect(difficultyOffset(undefined)).to.equal(0);
+    expect(difficultyOffset(NaN)).to.equal(0);
+    expect(difficultyOffset(-5)).to.be.closeTo(-1.8, 1e-9);    // input clamped to [0,1]
+    expect(difficultyOffset(5)).to.be.closeTo(1.2, 1e-9);
+  });
+
+  it("shifts the first target's Bloom level: easy → Understand, medium → Apply, hard → Analyze", () => {
+    const at = (d: number) => selectNextQuestion(createIRTState(), concepts(0.9, 0.7), difficultyOffset(d));
+    // base at θ=0 for importance 0.9: (0.9 − 0.5) × 1.5 = 0.6
+    expect(at(0.2).b_target).to.be.closeTo(-0.6, 1e-9);
+    expect(at(0.2).bloomTarget).to.equal("Understand");
+    expect(at(0.4).b_target).to.be.closeTo(0.0, 1e-9);
+    expect(at(0.4).bloomTarget).to.equal("Apply");
+    expect(at(0.65).b_target).to.be.closeTo(0.75, 1e-9);
+    expect(at(0.65).bloomTarget).to.equal("Analyze");
+    // No offset → unchanged legacy target
+    expect(selectNextQuestion(createIRTState(), concepts(0.9)).b_target).to.be.closeTo(0.6, 1e-9);
+  });
+
+  it("still adapts to θ, also in Fisher mode, and clamps to [−2, 2]", () => {
+    const high = { ...createIRTState(), theta: 1.0 };
+    const low = { ...createIRTState(), theta: -1.0 };
+    const off = difficultyOffset(0.2);
+    expect(selectNextQuestion(high, concepts(0.9), off).b_target)
+      .to.be.greaterThan(selectNextQuestion(low, concepts(0.9), off).b_target);
+    // Fisher mode (no tracked concepts): θ + offset
+    expect(selectNextQuestion(high, new Map(), off).b_target).to.be.closeTo(-0.2, 1e-9);
+    expect(selectNextQuestion({ ...createIRTState(), theta: 2 }, concepts(1.0), difficultyOffset(1)).b_target).to.equal(2);
+    expect(selectNextQuestion({ ...createIRTState(), theta: -2 }, new Map(), difficultyOffset(0)).b_target).to.equal(-2);
+  });
+
+  it("anchors the LLM difficulty rating to the target (±0.25), falling back to the target", () => {
+    expect(ITEM_DIFFICULTY_MAX_DEVIATION).to.equal(0.25);
+    expect(anchorItemDifficulty(1.0, -0.6)).to.be.closeTo(-0.35, 1e-9);  // over-rated
+    expect(anchorItemDifficulty(-2, 0.5)).to.be.closeTo(0.25, 1e-9);     // under-rated
+    expect(anchorItemDifficulty(0.1, 0.0)).to.be.closeTo(0.1, 1e-9);     // within band
+    expect(anchorItemDifficulty(NaN, 0.3)).to.equal(0.3);
+    expect(anchorItemDifficulty(undefined, -0.4)).to.equal(-0.4);
+    expect(anchorItemDifficulty(5, 1.9)).to.equal(2);                    // [−2, 2]
+    const once = anchorItemDifficulty(1.0, -0.6);
+    expect(anchorItemDifficulty(once, -0.6)).to.equal(once);             // idempotent
   });
 });

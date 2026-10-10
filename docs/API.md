@@ -328,10 +328,10 @@ await pocw.close();
 
 ```ts
 interface PoCWConfig {
-  max_questions?: number;            // integer 1–50, default 10 (raised to #important concepts, capped)
-  difficulty_preset?: "easy" | "medium" | "hard"; // overrides difficulty/threshold/max_questions
-  difficulty?: number;               // 0–1, default 0.5 — accepted but currently unused (θ starts at 0)
-  q_types?: ("open" | "mcq" | "true_false")[];   // non-empty; default all three (type chosen by target difficulty)
+  max_questions?: number;            // integer 1–50: the EXACT number of questions asked. Default 10 (or the preset's)
+  difficulty_preset?: "easy" | "medium" | "hard"; // overrides difficulty/threshold; max_questions only if not given
+  difficulty?: number;               // 0–1, default 0.5 — shifts every item's target difficulty (see below)
+  q_types?: ("open" | "mcq" | "true_false")[];   // non-empty; default all three. Only these types are ever asked
   threshold?: number;                // 0–1, default 0.7 → competenceIndicator when score ≥ 70
   response?: "boolean" | "score" | "detailed";   // "detailed" adds response_detail
   model?: string;                    // OpenRouter model override (HTTP: ignored unless ALLOW_MODEL_OVERRIDE=true)
@@ -342,11 +342,25 @@ interface PoCWConfig {
 }
 ```
 
-| Preset | difficulty | threshold | max_questions | cap |
-|---|---|---|---|---|
-| `easy` | 0.20 | 0.35 | 10 | 15 |
-| `medium` | 0.40 | 0.50 | 15 | 25 |
-| `hard` | 0.65 | 0.65 | 20 | 40 |
+| Preset | difficulty | threshold | max_questions (default) |
+|---|---|---|---|
+| `easy` | 0.20 | 0.35 | 10 |
+| `medium` | 0.40 | 0.50 | 15 |
+| `hard` | 0.65 | 0.65 | 20 |
+
+- **`max_questions`** is the session length: the session asks exactly this many questions — it is
+  not raised to the number of important concepts and does not stop early on IRT convergence. An
+  explicit `max_questions` wins over a preset's. `maxQuestions` (response of `POST /api/verify`) and
+  every `question.totalQuestions` equal it. If the content has more important concepts than
+  questions, the most important ones are asked first.
+- **`difficulty`** shifts each item's target difficulty by `3 × (difficulty − 0.6)` on the IRT
+  scale — easy 0.2 → −1.2 (mostly Remember/Understand, true/false + MCQ), medium 0.4 → −0.6
+  (mostly Understand/Apply), hard 0.65 → +0.15 (Apply/Analyze/Evaluate); default 0.5 → −0.3.
+  The learner's ability θ still moves the target up or down after every answer. See
+  [OPTIONS.md §2](OPTIONS.md#2-concept-mastery-loop).
+- **`q_types`**: with several types, the type follows the item's target difficulty among the
+  allowed types only (true/false for easier items, then MCQ, then open). If generating the
+  preferred type fails, the next allowed type is tried — never a type outside `q_types`.
 
 ### `VerifyQuestion`
 
@@ -356,8 +370,8 @@ interface VerifyQuestion {
   number: number;           // 1-based
   type: "open" | "mcq" | "true_false";
   bloomLevel: string;       // Remember … Create
-  difficulty: number;       // IRT b, [−2, 2]
-  totalQuestions: number;   // current maxQuestions
+  difficulty: number;       // IRT b, [−2, 2]: LLM rating anchored to the item's target (±0.25)
+  totalQuestions: number;   // exact number of questions in the session (= maxQuestions)
   options?: string[];       // mcq only (4 items)
 }
 ```

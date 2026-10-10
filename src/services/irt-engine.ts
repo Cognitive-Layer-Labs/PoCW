@@ -63,6 +63,39 @@ export const IRT_CORRECT_THRESHOLD = 70;
 export const IMPORTANT_CONCEPT_THRESHOLD = 0.65;
 export const MIN_IMPORTANT_CONCEPTS = 3;
 
+/**
+ * config.difficulty (0–1) → additive offset on every item target b_target:
+ *
+ *   offset = DIFFICULTY_OFFSET_SCALE × (difficulty − DIFFICULTY_NEUTRAL)
+ *
+ *   difficulty 0.20 (easy)   → −1.20
+ *   difficulty 0.40 (medium) → −0.60
+ *   difficulty 0.50 (default)→ −0.30
+ *   difficulty 0.65 (hard)   → +0.15
+ *   range 0 … 1              → −1.80 … +1.20
+ *
+ * Why these numbers: at θ = 0 the untuned target is (importance − 0.5) × 1.5, and important
+ * concepts have importance ≥ 0.65, so first targets sit at +0.2…+0.75 (Apply/Analyze, MCQ/open).
+ * −1.2 moves an easy session to −1.0…−0.45 (Remember/Understand; true/false, some MCQ), −0.6 moves
+ * a medium one to −0.4…+0.15 (Understand/Apply, MCQ) and +0.15 keeps hard roughly where the engine
+ * always started (Apply/Analyze, rising to Evaluate as answers come in). The offset is constant
+ * for the session, so θ still moves the target up or down after every answer (the offset only
+ * shifts where the adaptive walk is centred). Targets are clamped to [−2, 2].
+ */
+export const DIFFICULTY_NEUTRAL = 0.6;
+export const DIFFICULTY_OFFSET_SCALE = 3.0;
+
+/**
+ * The item difficulty b fed to the IRT update is the LLM's own rating, but only within
+ * ±ITEM_DIFFICULTY_MAX_DEVIATION (half a Bloom band) of the target it was generated for.
+ * Uncalibrated LLM ratings drift (a live run rated every question 1.0 whatever the target), and an
+ * unanchored b of 1.0 makes even wrong answers push θ up, which ratchets the session towards
+ * Evaluate/Create. Simulated easy sessions with an LLM that always says 1.0 stay on
+ * Understand/Apply (TF/MCQ) over 10 questions with ±0.25, but drift to Analyze/open by
+ * question 4 with ±0.5 — so the LLM may nudge b, not move it.
+ */
+export const ITEM_DIFFICULTY_MAX_DEVIATION = 0.25;
+
 // ─── 4PL model ────────────────────────────────────────────────────────────────
 
 /**
@@ -173,6 +206,28 @@ export function updateAbility(
   return { theta, se, responses: newResponses, converged };
 }
 
+// ─── Difficulty setting ──────────────────────────────────────────────────────
+
+const clampB = (b: number): number => Math.max(-2, Math.min(2, b));
+
+/** Target-difficulty offset for config.difficulty (0–1). See DIFFICULTY_NEUTRAL for the mapping. */
+export function difficultyOffset(difficulty: number | undefined): number {
+  if (typeof difficulty !== "number" || !Number.isFinite(difficulty)) return 0;
+  const d = Math.max(0, Math.min(1, difficulty));
+  return DIFFICULTY_OFFSET_SCALE * (d - DIFFICULTY_NEUTRAL);
+}
+
+/**
+ * IRT item difficulty b for a generated question: the LLM's rating clamped to
+ * target ± ITEM_DIFFICULTY_MAX_DEVIATION (and to [−2, 2]); the target itself when the rating is
+ * missing or not a finite number. Idempotent.
+ */
+export function anchorItemDifficulty(rated: number | undefined, target: number): number {
+  const t = clampB(target);
+  if (typeof rated !== "number" || !Number.isFinite(rated)) return t;
+  return clampB(Math.max(t - ITEM_DIFFICULTY_MAX_DEVIATION, Math.min(t + ITEM_DIFFICULTY_MAX_DEVIATION, rated)));
+}
+
 // ─── Concept mastery item selection ──────────────────────────────────────────
 
 /**
@@ -183,10 +238,14 @@ export function updateAbility(
  *      Edge direction rotates per askCount: direct→incoming→outgoing.
  *   2. Untested concepts — highest importance first, direct edge.
  *   3. All important concepts resolved — pure θ (Fisher mode).
+ *
+ * `offset` (from difficultyOffset(config.difficulty)) is added to every target, so the
+ * difficulty setting shifts the Bloom level / question type while θ keeps adapting.
  */
 export function selectNextQuestion(
   state: IRTState,
-  conceptMastery: ConceptMasteryMap
+  conceptMastery: ConceptMasteryMap,
+  offset = 0
 ): QuestionTarget {
   const theta = state.theta;
 
@@ -197,7 +256,7 @@ export function selectNextQuestion(
   if (failed.length > 0) {
     const concept = failed[0];
     const edge: 'incoming' | 'outgoing' = concept.askCount === 1 ? 'incoming' : 'outgoing';
-    const b = Math.max(-2, Math.min(2, theta + (concept.importance - 0.5) * 1.5));
+    const b = clampB(theta + (concept.importance - 0.5) * 1.5 + offset);
     return { targetConceptId: concept.conceptId, edgeDirection: edge, b_target: b, bloomTarget: difficultyToBloom(b) };
   }
 
@@ -207,12 +266,13 @@ export function selectNextQuestion(
 
   if (untested.length > 0) {
     const concept = untested[0];
-    const b = Math.max(-2, Math.min(2, theta + (concept.importance - 0.5) * 1.5));
+    const b = clampB(theta + (concept.importance - 0.5) * 1.5 + offset);
     return { targetConceptId: concept.conceptId, edgeDirection: 'direct', b_target: b, bloomTarget: difficultyToBloom(b) };
   }
 
-  // All resolved — pure Fisher
-  return { targetConceptId: null, edgeDirection: 'direct', b_target: theta, bloomTarget: difficultyToBloom(theta) };
+  // All resolved — pure Fisher (still shifted by the difficulty setting)
+  const b = clampB(theta + offset);
+  return { targetConceptId: null, edgeDirection: 'direct', b_target: b, bloomTarget: difficultyToBloom(b) };
 }
 
 /**

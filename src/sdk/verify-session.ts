@@ -10,11 +10,12 @@ import {
   createIRTState,
   updateAbility,
   selectNextQuestion,
-  isConceptMasteryComplete,
   thetaToScore,
   difficultyToBloom,
   isAberrant,
   questionTypeC,
+  difficultyOffset,
+  anchorItemDifficulty,
   IRTState,
   IRTResponse,
   ConceptMastery,
@@ -29,6 +30,7 @@ import {
   gradeMCQOrTF,
   GeneratedQuestion,
   GradeResult,
+  QuestionGenerationError,
 } from "../services/question-generator";
 import { selectChunkIndex } from "../services/session-manager";
 import { getContent } from "./content-store";
@@ -48,6 +50,39 @@ import {
 /** Fixed 4PL upper asymptote: P(correct) reaches 1.0 at high ability (keeps the
  *  (theta+2)/4*100 score projection self-consistent). */
 const IRT_D_CONSTANT = 1.0;
+
+/**
+ * Difficulty each question type is best suited to (IRT b). Mixed sessions pick the allowed type
+ * whose centre is nearest the item's b_target (ties go to the harder type). With all three types
+ * allowed this gives b < −0.5 → true_false, −0.5 ≤ b < 0.5 → mcq, b ≥ 0.5 → open; with a subset
+ * the bands simply merge (e.g. mcq+true_false: TF below −0.5, MCQ above; open+true_false: TF below 0).
+ */
+const TYPE_DIFFICULTY_CENTRE: Record<QuestionType, number> = {
+  true_false: -1.0,
+  mcq: 0.0,
+  open: 1.0,
+};
+
+/**
+ * Allowed question types for an item target, best first (nearest TYPE_DIFFICULTY_CENTRE, ties to
+ * the harder type). Only ever contains types from `allowed`; the tail is the fallback order used
+ * when generating the preferred type fails.
+ */
+export function rankQuestionTypes(b_target: number, allowed: readonly QuestionType[]): QuestionType[] {
+  const types = [...new Set(allowed)].filter(t => t in TYPE_DIFFICULTY_CENTRE);
+  return types.sort((x, y) => {
+    const dx = Math.abs(b_target - TYPE_DIFFICULTY_CENTRE[x]);
+    const dy = Math.abs(b_target - TYPE_DIFFICULTY_CENTRE[y]);
+    return dx - dy || TYPE_DIFFICULTY_CENTRE[y] - TYPE_DIFFICULTY_CENTRE[x];
+  });
+}
+
+/** Question type for an item target — always one of `allowed` (see rankQuestionTypes). */
+export function pickQuestionType(b_target: number, allowed: readonly QuestionType[]): QuestionType {
+  const ranked = rankQuestionTypes(b_target, allowed);
+  if (ranked.length === 0) throw new PoCWError("INVALID_CONFIG", "q_types must contain at least one valid type");
+  return ranked[0];
+}
 
 interface QuestionEntry {
   question: string;
@@ -88,7 +123,7 @@ export interface SessionSnapshot {
   } | null;
   currentChunkIndex: number;
   targetDifficulties: number[];
-  /** Effective question cap after init() (absent in pre-upgrade snapshots). */
+  /** Number of questions in the session (absent in pre-upgrade snapshots → config.max_questions). */
   maxQuestions?: number;
   complete: boolean;
   /** Final result, frozen on first getResult() so repeated fetches are identical. */
@@ -110,7 +145,7 @@ export class VerifySession {
 
   private irtState: IRTState;
   private conceptMastery: ConceptMasteryMap = new Map();
-  /** Effective max questions — raised to importantConceptCount after init(). */
+  /** Exact number of questions in the session (= config.max_questions; never expanded). */
   private _maxQuestions: number;
   private bloomCoverage: BloomCoverage = {};
   private questionHistory: QuestionEntry[] = [];
@@ -160,42 +195,52 @@ export class VerifySession {
       });
     }
 
-    // Expand to cover all important concepts, but never exceed the preset cap
-    this._maxQuestions = Math.min(
-      Math.max(this._maxQuestions, importantNodes.length),
-      this.config.cap_questions,
-    );
-
+    // The session length is exactly max_questions — it is never expanded to cover every important
+    // concept. When there are more concepts than questions, the mastery loop asks the most
+    // important ones first (selectNextQuestion), so the least important may go untested.
     await this._generateNextQuestion();
   }
 
   private async _generateNextQuestion(): Promise<void> {
-    const target = selectNextQuestion(this.irtState, this.conceptMastery);
+    const target = selectNextQuestion(
+      this.irtState, this.conceptMastery, difficultyOffset(this.config.difficulty),
+    );
+    // Store which concept is being targeted so submitAnswer can update its status
     this._currentTarget = { conceptId: target.targetConceptId, edgeDirection: target.edgeDirection };
-    this.targetDifficulties.push(target.b_target);
 
-    const qType = this.pickQuestionType(target.b_target);
     const previousQuestions = this.questionHistory.map(q => q.question);
     const chunkIdx = selectChunkIndex(this.chunkUsageCount);
     this.chunkUsageCount[chunkIdx]++;
     this._currentChunkIndex = chunkIdx;
 
-    // Store which concept is being targeted so submitAnswer can update its status
-    this._currentTarget = {
-      conceptId: target.targetConceptId,
-      edgeDirection: target.edgeDirection,
-    };
-
-    this._currentQuestion = await generateQuestion(
-      this.contentId,
-      this.chunks[chunkIdx],
-      target.b_target,
-      previousQuestions,
-      qType,
-      this.opts,
-      target.targetConceptId ?? undefined,
-      target.edgeDirection
-    );
+    // Preferred type first; if its generator gives up, fall back to the next *allowed* type
+    // (never to a type outside config.q_types).
+    let lastError: unknown;
+    for (const qType of rankQuestionTypes(target.b_target, this.config.q_types)) {
+      try {
+        const question = await generateQuestion(
+          this.contentId,
+          this.chunks[chunkIdx],
+          target.b_target,
+          previousQuestions,
+          qType,
+          this.opts,
+          target.targetConceptId ?? undefined,
+          target.edgeDirection
+        );
+        // b used by the IRT update (and shown to the caller): LLM rating anchored to the target.
+        question.difficulty = anchorItemDifficulty(question.difficulty, target.b_target);
+        // Pushed only on success so targetDifficulties[i] always belongs to question i.
+        this.targetDifficulties.push(target.b_target);
+        this._currentQuestion = question;
+        return;
+      } catch (err) {
+        if (!(err instanceof QuestionGenerationError)) throw err;
+        lastError = err;
+        console.warn(`[verify-session] ${qType} generation failed, trying next allowed type: ${err.message}`);
+      }
+    }
+    throw lastError ?? new PoCWError("INVALID_CONFIG", "q_types must contain at least one valid type");
   }
 
   /** Is the session still active (more questions to answer)? */
@@ -261,11 +306,19 @@ export class VerifySession {
       }
     }
 
+    // b ← the LLM's per-question difficulty rating, anchored to the target this question was
+    // generated for (±0.25, see anchorItemDifficulty; NaN/missing → the target).
+    // Already applied at generation time; repeated here for snapshots taken before that (idempotent).
+    const itemTarget = this.targetDifficulties[this.questionHistory.length];
+    const b = typeof itemTarget === "number"
+      ? anchorItemDifficulty(currentQ.difficulty, itemTarget)
+      : (Number.isFinite(currentQ.difficulty) ? Math.max(-2, Math.min(2, currentQ.difficulty)) : 0);
+
     // Record in history
     const entry: QuestionEntry = {
       question: currentQ.question,
       type: currentQ.type,
-      difficulty: currentQ.difficulty,
+      difficulty: b,
       bloomLevel: currentQ.bloomLevel,
       targetConcept: currentQ.targetConcept,
       conceptId: targetConceptId ?? this.resolveConceptIdByLabel(currentQ.targetConcept),
@@ -280,15 +333,10 @@ export class VerifySession {
     const bl = currentQ.bloomLevel;
     this.bloomCoverage[bl] = (this.bloomCoverage[bl] ?? 0) + 1;
 
-    // IRT update (4PL): a from contextual importance, b from the LLM's difficulty rating,
-    // c from question type, d a fixed constant. (No ML predictor — see PoCW/docs/OPTIONS.md.)
+    // IRT update (4PL): a from contextual importance, b from the anchored LLM difficulty rating
+    // (above), c from question type, d a fixed constant. (No ML predictor — see docs/OPTIONS.md.)
     const theta_before = this.irtState.theta;
 
-    // b ← the LLM's own per-question difficulty rating. Clamp to the IRT engine's [-2,2] range
-    // and guard against NaN (a truncated-JSON parse can yield NaN), falling back to the target.
-    const b = Number.isFinite(currentQ.difficulty)
-      ? Math.max(-2, Math.min(2, currentQ.difficulty))
-      : (this.targetDifficulties[this.questionHistory.length - 1] ?? 0);
     // c ← question type (guessing floor).
     const c = questionTypeC(currentQ.type);
     // a ← contextual importance of the target concept (KG importance, 0–1) → discrimination [0.5,2.5].
@@ -314,11 +362,10 @@ export class VerifySession {
       bloomLevel: difficultyToBloom(this.irtState.theta),
     };
 
-    // Stopping conditions
-    const masteryComplete = isConceptMasteryComplete(this.conceptMastery, this.irtState.se);
-    const isComplete = questionNumber >= this._maxQuestions
-      || this.irtState.converged
-      || masteryComplete;
+    // The session is fixed-length: it ends after exactly maxQuestions answers. IRT convergence
+    // and concept mastery are reported in the result but never stop the session early, so the
+    // number of questions always matches totalQuestions / maxQuestions.
+    const isComplete = questionNumber >= this._maxQuestions;
 
     if (isComplete) {
       this._complete = true;
@@ -460,19 +507,6 @@ export class VerifySession {
     return null;
   }
 
-  /**
-   * Pick question type.
-   * Single-type sessions: always return that type.
-   * Multi-type (mixed): difficulty-driven — T/F easy, MCQ medium, Open hard.
-   */
-  private pickQuestionType(b_target: number): QuestionType {
-    const types = this.config.q_types;
-    if (types.length === 1) return types[0];
-    if (b_target < -0.5) return "true_false";
-    if (b_target < 0.5)  return "mcq";
-    return "open";
-  }
-
   // ─── Serialization for Redis persistence ─────────────────────────────────
 
   toSnapshot(): SessionSnapshot {
@@ -521,11 +555,13 @@ export class VerifySession {
     (session as any)._currentQuestion = snap.currentQuestion;
     (session as any)._currentChunkIndex = snap.currentChunkIndex;
     (session as any).targetDifficulties = snap.targetDifficulties;
+    // Pre-upgrade snapshots lack maxQuestions: use the configured count (never below the
+    // number of the question already on screen).
     (session as any)._maxQuestions = typeof snap.maxQuestions === "number"
       ? snap.maxQuestions
-      : Math.min(
-          Math.max(snap.config.max_questions, snap.conceptMastery?.length ?? 0),
-          snap.config.cap_questions,
+      : Math.max(
+          snap.config.max_questions,
+          (snap.questionHistory?.length ?? 0) + (snap.currentQuestion && !snap.complete ? 1 : 0),
         );
     (session as any)._complete = snap.complete;
     (session as any)._result = snap.result ?? null;

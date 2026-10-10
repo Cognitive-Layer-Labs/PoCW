@@ -9,19 +9,23 @@ export type QuestionType = "open" | "mcq" | "true_false";
 // ─── Configuration ───────────────────────────────────────────────────────────
 
 export interface PoCWConfig {
-  /** Maximum questions before session ends. Default: 10 */
+  /** Exact number of questions in the session (1–50). Default: 10, or the preset's count.
+   *  An explicit value always wins over a preset. The session never stops early or expands. */
   max_questions?: number;
   /**
-   * Difficulty preset. Overrides `difficulty` and `threshold`.
-   *   easy   → difficulty 0.2, threshold 0.35  (good for general audiences)
-   *   medium → difficulty 0.4, threshold 0.50
-   *   hard   → difficulty 0.65, threshold 0.65
+   * Difficulty preset. Overrides `difficulty` and `threshold` (and supplies `max_questions`
+   * when the caller does not pass one).
+   *   easy   → difficulty 0.2, threshold 0.35, 10 questions (good for general audiences)
+   *   medium → difficulty 0.4, threshold 0.50, 15 questions
+   *   hard   → difficulty 0.65, threshold 0.65, 20 questions
    */
   difficulty_preset?: "easy" | "medium" | "hard";
-  /** Difficulty 0-1. Default: 0.5. Accepted and validated but currently unused: the session
-   *  starts at theta 0 and adapts from there (item difficulty comes from the concept loop). */
+  /** Difficulty 0-1. Default: 0.5. Shifts every item's target difficulty (and so its Bloom level
+   *  and, in mixed sessions, its type) by 3 × (difficulty − 0.6) on the IRT scale: 0.2 → −1.2
+   *  (Remember/Understand), 0.4 → −0.6 (Understand/Apply), 0.65 → +0.15 (Apply/Analyze/Evaluate).
+   *  θ still adapts the target up or down after every answer. */
   difficulty?: number;
-  /** Question types to use. Default: ["open"] */
+  /** Question types to use. Default: all three. Only these types are ever asked (incl. fallbacks). */
   q_types?: QuestionType[];
   /** Pass/fail threshold 0-1. Default: 0.7 */
   threshold?: number;
@@ -49,9 +53,8 @@ export const DEFAULT_CONFIG: Required<
 
 /** Internal resolved config with defaults applied */
 export interface ResolvedConfig {
+  /** Exact number of questions in the session. */
   max_questions: number;
-  /** Hard ceiling on dynamic question expansion (always >= max_questions). */
-  cap_questions: number;
   difficulty: number;
   q_types: QuestionType[];
   threshold: number;
@@ -67,19 +70,17 @@ const DIFFICULTY_PRESETS: Record<string, {
   threshold: number;
   importance_threshold: number;
   max_questions: number;
-  cap_questions: number;
 }> = {
-  easy:   { difficulty: 0.20, threshold: 0.35, importance_threshold: 0.80, max_questions: 10, cap_questions: 15 },
-  medium: { difficulty: 0.40, threshold: 0.50, importance_threshold: 0.65, max_questions: 15, cap_questions: 25 },
-  hard:   { difficulty: 0.65, threshold: 0.65, importance_threshold: 0.50, max_questions: 20, cap_questions: 40 },
+  easy:   { difficulty: 0.20, threshold: 0.35, importance_threshold: 0.80, max_questions: 10 },
+  medium: { difficulty: 0.40, threshold: 0.50, importance_threshold: 0.65, max_questions: 15 },
+  hard:   { difficulty: 0.65, threshold: 0.65, importance_threshold: 0.50, max_questions: 20 },
 };
 
 export function resolveConfig(config?: PoCWConfig): ResolvedConfig {
   const preset = config?.difficulty_preset ? DIFFICULTY_PRESETS[config.difficulty_preset] : null;
-  const max_q = preset?.max_questions ?? config?.max_questions ?? DEFAULT_CONFIG.max_questions;
   return {
-    max_questions: max_q,
-    cap_questions: preset?.cap_questions ?? max_q * 2,
+    // An explicit max_questions is the exact session length, even with a preset.
+    max_questions: config?.max_questions ?? preset?.max_questions ?? DEFAULT_CONFIG.max_questions,
     difficulty: preset?.difficulty ?? config?.difficulty ?? DEFAULT_CONFIG.difficulty,
     q_types: config?.q_types ?? DEFAULT_CONFIG.q_types,
     threshold: preset?.threshold ?? config?.threshold ?? DEFAULT_CONFIG.threshold,
@@ -155,7 +156,8 @@ export interface AnswerFeedback {
     precision_cap: number;
   };
   /** IRT parameters used for this item and the resulting ability shift.
-   *  a ← contextual importance, b ← LLM difficulty rating, c ← question type, d ← constant. */
+   *  a ← contextual importance, b ← LLM difficulty rating anchored to the item target (±0.25),
+   *  c ← question type, d ← constant. */
   irtParams?: {
     a: number;
     b: number;

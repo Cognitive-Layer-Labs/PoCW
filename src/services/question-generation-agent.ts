@@ -97,11 +97,14 @@ function levenshteinRatio(a: string, b: string): number {
   return prev[n] / Math.max(m, n);
 }
 
-function isTooSimilar(newQ: string, previous: string[]): boolean {
+export function isTooSimilar(newQ: string, previous: string[]): boolean {
   const norm = normalizeText(newQ);
   return previous.some(q => {
     const nq = normalizeText(q);
-    return jaccardBigram(norm, nq) > JACCARD_THRESHOLD || levenshteinRatio(norm, nq) > LEVENSHTEIN_RATIO_THRESHOLD;
+    // levenshteinRatio is a normalised *distance* (0 = identical), so similarity is 1 − ratio.
+    // (Comparing the distance itself flagged unrelated questions as duplicates and forced every
+    // generation after the first through high-temperature retries.)
+    return jaccardBigram(norm, nq) > JACCARD_THRESHOLD || 1 - levenshteinRatio(norm, nq) > LEVENSHTEIN_RATIO_THRESHOLD;
   });
 }
 
@@ -123,9 +126,15 @@ function buildSystemPrompt(base: string, opts?: GenerationOpts): string {
 
 function buildUserMessage(
   targetBloom: string, conceptsCtx: string, subgraphCtx: string, prevCtx: string,
-  content: string, opts?: GenerationOpts, edgeDirection?: 'direct' | 'incoming' | 'outgoing'
+  content: string, opts?: GenerationOpts, edgeDirection?: 'direct' | 'incoming' | 'outgoing',
+  targetDifficulty?: number
 ): string {
-  let msg = `TARGET_BLOOM_LEVEL: ${targetBloom}\n\nTARGET_CONCEPTS:\n${conceptsCtx}\n\nSUBGRAPH_CONTEXT:\n${subgraphCtx}\n\nPREVIOUS_QUESTIONS:\n${prevCtx}\n\n`;
+  // TARGET_DIFFICULTY gives the LLM the numeric scale for its own "difficulty" rating (which is
+  // then anchored to this target by the session — see anchorItemDifficulty in irt-engine.ts).
+  const diffLine = typeof targetDifficulty === "number" && Number.isFinite(targetDifficulty)
+    ? `TARGET_DIFFICULTY: ${targetDifficulty.toFixed(2)} (IRT scale: -2 very easy, 0 medium, 2 very hard)\n\n`
+    : "";
+  let msg = `TARGET_BLOOM_LEVEL: ${targetBloom}\n\n${diffLine}TARGET_CONCEPTS:\n${conceptsCtx}\n\nSUBGRAPH_CONTEXT:\n${subgraphCtx}\n\nPREVIOUS_QUESTIONS:\n${prevCtx}\n\n`;
   if (edgeDirection === 'incoming') {
     msg += `EDGE_FOCUS: This is a re-ask. Focus on what LEADS TO or DEFINES this concept — its preconditions, causes, and context.\n\n`;
   } else if (edgeDirection === 'outgoing') {
@@ -140,9 +149,10 @@ function buildUserMessage(
 
 function buildUserMessageWithFeedback(
   targetBloom: string, conceptsCtx: string, subgraphCtx: string, prevCtx: string,
-  content: string, feedback: string, opts?: GenerationOpts, edgeDirection?: 'direct' | 'incoming' | 'outgoing'
+  content: string, feedback: string, opts?: GenerationOpts, edgeDirection?: 'direct' | 'incoming' | 'outgoing',
+  targetDifficulty?: number
 ): string {
-  const base = buildUserMessage(targetBloom, conceptsCtx, subgraphCtx, prevCtx, content, opts, edgeDirection);
+  const base = buildUserMessage(targetBloom, conceptsCtx, subgraphCtx, prevCtx, content, opts, edgeDirection, targetDifficulty);
   return `${base}\n\nEVALUATOR_FEEDBACK (previous attempt was rejected — address these issues):\n${feedback}`;
 }
 
@@ -333,8 +343,8 @@ export class QuestionGenerationAgent {
       const temperature = 0.3 + attempt * 0.25;
 
       const userMsg = evaluatorFeedback && attempt === 0
-        ? buildUserMessageWithFeedback(ctx.targetBloom, ctx.conceptsCtx, ctx.subgraphCtx, ctx.prevCtx, contentText, evaluatorFeedback, opts, edgeDirection)
-        : buildUserMessage(ctx.targetBloom, ctx.conceptsCtx, ctx.subgraphCtx, ctx.prevCtx, contentText, opts, edgeDirection);
+        ? buildUserMessageWithFeedback(ctx.targetBloom, ctx.conceptsCtx, ctx.subgraphCtx, ctx.prevCtx, contentText, evaluatorFeedback, opts, edgeDirection, targetDifficulty)
+        : buildUserMessage(ctx.targetBloom, ctx.conceptsCtx, ctx.subgraphCtx, ctx.prevCtx, contentText, opts, edgeDirection, targetDifficulty);
 
       let result: GeneratedQuestion;
       try {

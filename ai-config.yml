@@ -80,8 +80,9 @@ kaqg-prompt: |
   - Question MUST be answerable from the provided content.
   - Do NOT repeat or rephrase any previous question.
   - Do NOT generate questions about disclaimers, privacy policies, legal notices, or website navigation.
-  - Avoid "Ctrl+F" searchable questions.
-  - Match the specified Bloom's level precisely.
+  - Avoid "Ctrl+F" searchable questions at Apply level and above.
+  - Match the specified Bloom's level precisely. TARGET_BLOOM_LEVEL wins over the Bloom level shown next to a concept.
+  - Remember/Understand: ask a plain, direct question about ONE fact or idea stated in the content, answerable in a sentence or two by someone who read the material once. No scenarios, hypotheticals, multi-part questions or trade-offs.
 
   FORMULATION GUIDELINES:
   - Write naturally, as a thoughtful human educator would phrase it.
@@ -95,7 +96,7 @@ kaqg-prompt: |
     "referenceKeyPoints": ["key point 1 a correct answer must cover", "key point 2", "key point 3"],
     "targetConcept": "primary_concept_id",
     "bloomLevel": "the bloom level used",
-    "difficulty": <number -2 to 2, IRT difficulty estimate>
+    "difficulty": <number -2 to 2, your estimate on the TARGET_DIFFICULTY scale; stay close to TARGET_DIFFICULTY unless the question clearly came out easier or harder>
   }
 
   referenceKeyPoints: 3-6 concise statements of facts or reasoning a complete answer must include.
@@ -201,7 +202,8 @@ kaqg-mcq-prompt: |
   - Question MUST be answerable from the provided content.
   - Do NOT repeat or rephrase any previous question.
   - Do NOT generate questions about disclaimers, privacy policies, legal notices, or website navigation.
-  - Match the specified Bloom's level precisely.
+  - Match the specified Bloom's level precisely. TARGET_BLOOM_LEVEL wins over the Bloom level shown next to a concept.
+  - Remember/Understand: a short, plain question about ONE fact or idea stated in the content, with short options. No scenarios or hypotheticals.
   - Write naturally and concisely — as a human educator would phrase it.
 
   OUTPUT FORMAT (JSON Only):
@@ -211,7 +213,7 @@ kaqg-mcq-prompt: |
     "correctAnswer": "A",
     "targetConcept": "primary_concept_id",
     "bloomLevel": "the bloom level used",
-    "difficulty": <number -3 to 3, IRT difficulty estimate>
+    "difficulty": <number -2 to 2, your estimate on the TARGET_DIFFICULTY scale; stay close to TARGET_DIFFICULTY unless the question clearly came out easier or harder>
   }
 
 # --- KAQG: True/False Statement Generation ---
@@ -233,7 +235,8 @@ kaqg-tf-prompt: |
   - Aim for roughly 50/50 distribution of true and false statements across a session.
   - Do NOT repeat or rephrase any previous statement.
   - Do NOT generate statements about disclaimers, privacy policies, legal notices, or website navigation.
-  - Match the specified Bloom's level precisely.
+  - Match the specified Bloom's level precisely. TARGET_BLOOM_LEVEL wins over the Bloom level shown next to a concept.
+  - Remember/Understand: one short, plain statement about ONE fact or idea stated in the content.
   - Write naturally and concisely.
 
   OUTPUT FORMAT (JSON Only):
@@ -242,5 +245,5 @@ kaqg-tf-prompt: |
     "correctAnswer": true,
     "targetConcept": "primary_concept_id",
     "bloomLevel": "the bloom level used",
-    "difficulty": <number -2 to 2, IRT difficulty estimate>
+    "difficulty": <number -2 to 2, your estimate on the TARGET_DIFFICULTY scale; stay close to TARGET_DIFFICULTY unless the question clearly came out easier or harder>
   }

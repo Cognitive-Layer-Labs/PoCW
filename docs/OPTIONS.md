@@ -33,7 +33,11 @@ LLMs tend to cluster importance scores at 8–10 for most nodes. Rank-based scor
 
 ## 2. Concept Mastery Loop
 
-At session start, the engine loads all nodes with `importance ≥ 0.65` as **important concepts** (minimum 3, regardless of threshold). Each concept starts as `untested`.
+At session start, the engine loads all nodes with `importance ≥ 0.65` (preset: easy 0.80, hard 0.50) as **important concepts** (minimum 3, regardless of threshold). Each concept starts as `untested`.
+
+The session length is fixed (`max_questions`, see §9). It is never raised to cover every important
+concept: when there are more important concepts than questions, the most important are asked first
+and the least important may stay untested (`asked: 0` in `concepts[]`).
 
 ```
 untested → asked → mastered   (correct answer)
@@ -45,6 +49,23 @@ untested → asked → mastered   (correct answer)
 1. `failed` concepts first (re-ask with a different KG edge direction)
 2. `untested` concepts next (in descending importance order)
 3. If all important concepts are resolved: pure IRT Fisher information maximization (targets the b closest to current θ)
+
+**Target difficulty of the next item:**
+
+```
+b_target = clamp(θ + (importance − 0.5) × 1.5 + offset, −2, 2)     (Fisher mode: θ + offset)
+offset   = 3 × (difficulty − 0.6)                                  (config.difficulty ∈ [0, 1])
+```
+
+| `difficulty` | offset | first targets at θ = 0 (importance 0.65–1.0) | typical Bloom / type |
+|---|---|---|---|
+| 0.20 (easy) | −1.20 | −0.98 … −0.45 | Remember/Understand, true/false + MCQ |
+| 0.40 (medium) | −0.60 | −0.38 … +0.15 | Understand/Apply, MCQ |
+| 0.50 (default) | −0.30 | −0.08 … +0.45 | Understand/Apply |
+| 0.65 (hard) | +0.15 | +0.38 … +0.90 | Apply/Analyze, rising to Evaluate |
+
+The offset is constant for the session; θ still moves the target after every answer, so a strong
+learner gets harder items and a struggling one easier items within the chosen band.
 
 **Edge direction rotation on re-ask:**
 Each concept has a graph with incoming and outgoing edges. Re-asks use a different slice of that graph to generate a different question:
@@ -68,7 +89,7 @@ P(correct | θ) = c + (d − c) / (1 + exp(−a · (θ − b)))
 | Parameter | Meaning | Range | Source |
 |---|---|---|---|
 | `θ` (theta) | User ability | [−2, 2] | Estimated via MAP Newton-Raphson |
-| `b` | Item difficulty | [−2, 2] | KAQG LLM's per-question difficulty rating |
+| `b` | Item difficulty | [−2, 2] | KAQG LLM's per-question difficulty rating, anchored to `b_target` ± 0.25 |
 | `a` | Discrimination | [0.5, 2.5] | Target concept's contextual importance (KG) |
 | `c` | Lower asymptote (guessing) | 0–0.5 | Type-based rule (see below) |
 | `d` | Upper asymptote | constant | Fixed `1.0` |
@@ -83,7 +104,11 @@ P(correct | θ) = c + (d − c) / (1 + exp(−a · (θ − b)))
 
 **Parameter sources:**
 
-- `b` is the KAQG LLM's own difficulty rating for the generated question (in [−2, 2]).
+- `b` is the KAQG LLM's own difficulty rating for the generated question, clamped to
+  `b_target ± 0.25` (and [−2, 2]); `b_target` itself when the rating is missing. The generator is
+  told `TARGET_DIFFICULTY`, but uncalibrated ratings drift (a live run rated every question 1.0),
+  and an unanchored over-rating makes every answer — even a wrong one — push θ up, which walks the
+  session towards Evaluate/Create. The same anchored value is returned as `question.difficulty`.
 - `a = clamp(0.5, 2.5, 0.5 + 2.0 × importance)`, where `importance` ∈ [0, 1] is the target
   concept's contextual importance in the Knowledge Graph (more central concept ⇒ more discriminating).
 - `c` is the type-based guessing floor (table above).
@@ -137,6 +162,8 @@ target difficulty b → suggested Bloom:
 ```
 
 The question-generation LLM assigns the final Bloom level of each question (it may differ from the suggestion).
+`config.difficulty` shifts the target difficulty and therefore the suggested Bloom level (§2). The
+generation prompts ask for plain, direct, single-fact questions at Remember/Understand.
 
 ---
 
@@ -150,7 +177,18 @@ When `q_types` contains more than one type (default: all three), the type is sel
 | −0.5 to 0.5 | `mcq` | Medium difficulty: structured application |
 | ≥ 0.5 | `open` | Hard questions: free-text reasoning required |
 
-Set `q_types: ["mcq"]` (single type) to override this and always use MCQ regardless of difficulty.
+Only types in `q_types` are ever used. Each type has a centre (true_false −1, mcq 0, open +1) and the
+allowed type nearest `b_target` wins (ties → the harder type), so with a subset the bands merge:
+
+| `q_types` | Selection |
+|---|---|
+| `mcq` + `true_false` | true_false below −0.5, mcq above |
+| `open` + `true_false` | true_false below 0, open above |
+| `open` + `mcq` | mcq below 0.5, open above |
+
+If the chosen type cannot be generated, the next allowed type (by the same distance) is tried; if
+none can, the request fails — the engine never substitutes a type outside `q_types`.
+Set `q_types: ["mcq"]` (single type) to always use MCQ regardless of difficulty.
 
 ---
 
@@ -203,16 +241,15 @@ Difficulty presets override it (easy 0.35, medium 0.50, hard 0.65).
 
 ## 9. Stopping Conditions
 
-The session ends when **any one** of these is true:
+Sessions are fixed-length: the session ends after exactly `maxQuestions` answers, where
+`maxQuestions` (returned by `POST /api/verify`, and `totalQuestions` on every question) is
+`max_questions` — the caller's value, else the preset's, else 10. It is not raised to the number of
+important concepts and it is not cut short.
 
-| Condition | Check |
-|---|---|
-| Max questions reached | `questionsAsked ≥ maxQuestions` |
-| IRT converged | `questionsAsked ≥ 4 AND SE < 0.40`, or `questionsAsked ≥ 15` |
-| Concept mastery complete | All important concepts are `mastered` or `failed_final` AND `SE < 0.40` |
-
-`maxQuestions` (returned by `POST /api/verify`) is `max_questions` raised to the number of important
-concepts, capped at `cap_questions` (preset cap, or `2 × max_questions` without a preset).
+IRT convergence (`questionsAsked ≥ 4 AND SE < 0.40`, or `questionsAsked ≥ 15`) is reported as
+`converged` in the result but does not end the session; neither does resolving every important
+concept. The only way a session ends early is an error (e.g. no allowed question type can be
+generated from the content), which is returned to the caller.
 
 ---
 
