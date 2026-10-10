@@ -370,6 +370,24 @@ app.get("/api/index/:knowledgeId", (req: Request, res: Response) => {
 });
 
 /**
+ * GET /api/index/:knowledgeId/text
+ * The full extracted text of a resource (what the graph and questions are built from), as
+ * text/plain. For URL sources it is re-fetched if it isn't cached.
+ */
+app.get("/api/index/:knowledgeId/text", async (req: Request, res: Response) => {
+  if (!getContent(req.params.knowledgeId)) {
+    return res.status(404).json({ error: "Content not found", code: "CONTENT_NOT_FOUND" });
+  }
+  try {
+    const { text } = await getPoCW().getContentChunks(req.params.knowledgeId);
+    res.set("Cache-Control", "no-store");
+    return res.type("text/plain; charset=utf-8").send(text);
+  } catch (err) {
+    return sendError(res, err);
+  }
+});
+
+/**
  * PATCH /api/index/:knowledgeId/title
  * Re-derive the title from the source (no body) or store a custom one ({ title }).
  */

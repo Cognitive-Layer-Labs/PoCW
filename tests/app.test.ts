@@ -36,6 +36,7 @@ describe("HTTP API", function () {
       return { contentRemoved: 0, nodesRemoved: 0 };
     },
     lastVerifyConfig: undefined as Record<string, unknown> | undefined,
+    getContentChunks: async (_id: string) => ({ text: "", chunks: [] as string[] }),
     async verify(_id: string, _subject: string, config: Record<string, unknown>) {
       fakePoCW.lastVerifyConfig = config;
       throw new PoCWError("CONTENT_NOT_FOUND", "stop after capturing config");
@@ -174,6 +175,30 @@ describe("HTTP API", function () {
       const body = await (await get("/api/index/ok")).json();
       expect(body).to.include({ title: "Pride and Prejudice", author: "Jane Austen" });
       expect(body).to.not.have.property("source"); // uploads are not echoed back
+    } finally {
+      __setDbForTest(null);
+      db.close();
+    }
+  });
+
+  it("GET /api/index/:id/text returns the full extracted text, 404 for unknown ids", async () => {
+    const db = new Database(":memory:");
+    __setDbForTest(db);
+    try {
+      db.exec(`CREATE TABLE content_index (knowledge_id TEXT PRIMARY KEY, content_type TEXT NOT NULL, source TEXT NOT NULL,
+        title TEXT, description TEXT, status TEXT NOT NULL DEFAULT 'pending', error TEXT, content_id INTEGER, content_hash TEXT,
+        chunk_count INTEGER DEFAULT 0, created_at TEXT NOT NULL DEFAULT (datetime('now')), indexed_at TEXT,
+        usage_count INTEGER DEFAULT 0, last_used_at TEXT)`);
+      __setDbForTest(db);
+      await insertContent("book", "raw_text", "stored", 9);
+      fakePoCW.getContentChunks = async (id: string) => ({ text: `Full text of ${id}`, chunks: [] });
+      const res = await get("/api/index/book/text");
+      expect(res.status).to.equal(200);
+      expect(res.headers.get("content-type")).to.match(/^text\/plain/);
+      expect(await res.text()).to.equal("Full text of book");
+      const missing = await get("/api/index/nope/text");
+      expect(missing.status).to.equal(404);
+      expect(await missing.json()).to.include({ code: "CONTENT_NOT_FOUND" });
     } finally {
       __setDbForTest(null);
       db.close();

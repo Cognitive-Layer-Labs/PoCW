@@ -139,6 +139,15 @@ the usual derivation (web page title via LLM, first line of text).
 
 ---
 
+### `GET /api/index/:knowledgeId/text`
+
+The full extracted text the graph and questions are built from, as `text/plain; charset=utf-8`
+(Gutenberg licence stripped, up to 4,000,000 characters). Uploads return the stored text; URL
+sources are re-fetched when not cached. `404` (`CONTENT_NOT_FOUND`) for unknown ids. Meant for
+operators (e.g. an admin "download material" button) — don't expose it to untrusted clients.
+
+---
+
 ### `PATCH /api/index/:knowledgeId/title`
 
 Body `{ "title": "Custom title" }` stores a title; with no body the title is re-derived from a URL
