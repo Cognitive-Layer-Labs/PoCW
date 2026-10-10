@@ -7,6 +7,8 @@ import { validateConfig } from "../src/sdk/index";
 import Database from "better-sqlite3";
 import { __setDbForTest, insertContent, updateMetadata } from "../src/sdk/content-store";
 import { makeEpub } from "./helpers/fixtures";
+import { recordCall, recordSessionFinished } from "../src/services/usage-store";
+import { __setKeyStatusFetchForTest, KEY_STATUS_URL } from "../src/services/openrouter-key";
 
 /**
  * HTTP-layer tests (no FalkorDB/Redis): auth, admin gating, rate limiting, input validation.
@@ -242,6 +244,48 @@ describe("HTTP API", function () {
     });
     expect(bad.status).to.equal(400);
     expect((await bad.json()).error).to.be.a("string");
+  });
+
+  it("GET /api/usage: needs the API key; returns key status, totals, byDay, byTask, perBook, perSession", async () => {
+    const db = new Database(":memory:");
+    __setDbForTest(db);
+    const keyCalls: string[] = [];
+    __setKeyStatusFetchForTest(async (url, init) => {
+      keyCalls.push(`${url} ${(init.headers as Record<string, string>).Authorization}`);
+      return new Response(JSON.stringify({ data: { limit: 6, usage: 1.25, limit_remaining: 4.75 } }), { status: 200 });
+    });
+    process.env.OPENROUTER_API_KEY = "or-key";
+    try {
+      recordCall({ task: "kg", model: "anthropic/claude-haiku-5.5", costUsd: 0.004, latencyMs: 1200, ok: true, knowledgeId: "A" });
+      recordCall({ task: "grade", model: "typesafe/jev-1.13-20260917", costUsd: 0.00002, latencyMs: 300, ok: true, sessionId: "s1" });
+      recordCall({ task: "grade_escalation", model: "openai/gpt-6-luna", latencyMs: 900, ok: false, error: "x", sessionId: "s1" });
+      recordSessionFinished("s1", "A");
+
+      process.env.POCW_API_KEY = "secret";
+      expect((await get("/api/usage")).status).to.equal(401);
+      const res = await get("/api/usage?days=7", { Authorization: "Bearer secret" });
+      expect(res.status).to.equal(200);
+      expect(res.headers.get("cache-control")).to.equal("no-store");
+      const body = await res.json();
+      expect(body.key).to.deep.equal({ limitUsd: 6, usageUsd: 1.25, remainingUsd: 4.75 });
+      expect(body.totals).to.deep.equal({ calls: 3, costUsd: 0.00402, errors: 1 });
+      expect(body.byDay).to.have.length(7);
+      expect(body.byDay[6]).to.deep.equal({ date: new Date().toISOString().slice(0, 10), calls: 3, costUsd: 0.00402 });
+      expect(body.byTask.map((t: { task: string }) => t.task)).to.deep.equal(["kg", "grade", "grade_escalation"]);
+      expect(body.byTask[2]).to.deep.equal({ task: "grade_escalation", model: "openai/gpt-6-luna", calls: 1, costUsd: 0, avgLatencyMs: 900, errors: 1 });
+      expect(body.perBook).to.deep.equal({ avgCostUsd: 0.004, count: 1 });
+      expect(body.perSession).to.deep.equal({ avgCostUsd: 0.00002, count: 1 });
+
+      // key status is cached (~60 s); days is clamped to 1–90
+      const again = await (await get("/api/usage?days=999", { Authorization: "Bearer secret" })).json();
+      expect(again.byDay).to.have.length(90);
+      expect(keyCalls).to.deep.equal([`${KEY_STATUS_URL} Bearer or-key`]);
+    } finally {
+      __setKeyStatusFetchForTest(async () => new Response("network disabled in tests", { status: 400 }));
+      delete process.env.OPENROUTER_API_KEY;
+      __setDbForTest(null);
+      db.close();
+    }
   });
 
   it("status polling does not consume the main rate-limit budget", async () => {

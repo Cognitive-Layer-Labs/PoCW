@@ -12,6 +12,7 @@ import Database from "better-sqlite3";
 import * as path from "path";
 import * as fs from "fs";
 import { ContentRow, IndexStatus } from "./types";
+import { attachUsageStore } from "../services/usage-store";
 
 let db: Database.Database | null = null;
 
@@ -76,7 +77,13 @@ export function initContentStore(
   dbPath: string = path.resolve(process.cwd(), "data", "pocw.db")
 ): void {
   if (db) return;
+  openContentStore(dbPath);
+  // LLM / decisions call log lives in the same database (migrated + pruned on attach). Only an
+  // explicit init (PoCW.init at engine startup) attaches it — a lazy open by getDb() does not.
+  attachUsageStore(db);
+}
 
+function openContentStore(dbPath: string): void {
   const dir = path.dirname(dbPath);
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
@@ -101,7 +108,7 @@ function migrate(database: Database.Database): void {
 
 /** Get the database instance, initializing if needed. */
 function getDb(): Database.Database {
-  if (!db) initContentStore();
+  if (!db) openContentStore(path.resolve(process.cwd(), "data", "pocw.db"));
   return db!;
 }
 
@@ -306,6 +313,7 @@ export async function recoverStuckIndexingJobs(timeoutMinutes = 15): Promise<num
  */
 export function closeContentStore(): void {
   if (db) {
+    attachUsageStore(null);
     db.close();
     db = null;
   }
@@ -315,4 +323,5 @@ export function closeContentStore(): void {
 export function __setDbForTest(testDb: Database.Database | null): void {
   db = testDb;
   if (testDb) migrate(testDb);
+  attachUsageStore(testDb);
 }

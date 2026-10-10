@@ -355,11 +355,11 @@ describe("difficulty setting (config.difficulty → target offset)", () => {
         for (const b of blooms) expect(rank(b), blooms.join(",")).to.be.at.most(rank("Analyze"));
       });
 
-      it(`hard reaches Evaluate only after several correct answers, never Create (${name})`, () => {
+      it(`hard climbs to Analyze for a strong learner; targets are capped there (never Evaluate/Create) (${name})`, () => {
         const blooms = simulate(0.65, 10, allCorrect, rate);
-        expect(rank(blooms[0])).to.be.at.most(rank("Analyze"));
-        expect(rank(blooms[1])).to.be.at.most(rank("Analyze"));
-        expect(blooms).to.include("Evaluate");
+        expect(rank(blooms[0])).to.be.at.most(rank("Apply"));
+        expect(blooms).to.include("Analyze");
+        expect(blooms).to.not.include("Evaluate");
         expect(blooms).to.not.include("Create");
       });
 

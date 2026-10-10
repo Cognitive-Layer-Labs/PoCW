@@ -6,7 +6,10 @@
  */
 
 import { OpenAI } from "openai";
+import type { ChatCompletion, ChatCompletionMessageParam } from "openai/resources/chat/completions";
 import { PoCWError } from "../sdk/types";
+import type { ModelSpec } from "./ai-config";
+import { recordCall } from "./usage-store";
 
 let openaiClient: OpenAI | null = null;
 
@@ -143,4 +146,108 @@ export async function callLLM<T>(fn: (client: OpenAI) => Promise<T>): Promise<T>
   }
 
   throw lastErr instanceof Error ? lastErr : new Error("LLM call failed after retries");
+}
+
+// ─── Task calls (model spec → OpenRouter request, call log) ─────────────────
+
+export interface ChatRequest {
+  messages: ChatCompletionMessageParam[];
+  temperature?: number;
+  max_tokens?: number;
+  response_format?: { type: "json_object" | "text" };
+  seed?: number;
+}
+
+export interface ChatCallOptions {
+  /** Caller-chosen model (config.model with ALLOW_MODEL_OVERRIDE): replaces the configured model,
+   *  its fallbacks and its reasoning setting. */
+  modelOverride?: string;
+  /** Through the circuit breaker + retry (default). KG extraction and titles call once — they
+   *  have their own retry / fallback. */
+  resilient?: boolean;
+  /** Outcome stored with the call-log row (e.g. "escalated:low_confidence"). */
+  outcome?: string;
+}
+
+/**
+ * OpenRouter request body for a task: "models" = [primary, ...fallbacks] (OpenRouter tries them in
+ * order), "reasoning" from the config, "usage": { include: true } so the response carries usage.cost.
+ */
+export function buildChatBody(spec: ModelSpec, req: ChatRequest, modelOverride?: string): Record<string, unknown> {
+  const models = modelOverride ? [modelOverride] : [spec.model, ...spec.fallbacks];
+  const body: Record<string, unknown> = { model: models[0], ...req, usage: { include: true } };
+  if (models.length > 1) body.models = models;
+  if (spec.reasoning && !modelOverride) body.reasoning = spec.reasoning;
+  for (const key of Object.keys(body)) if (body[key] === undefined) delete body[key];
+  return body;
+}
+
+function describeError(err: unknown): string {
+  if (err instanceof OpenAI.APIError) return `${err.status ?? "?"} ${err.message}`;
+  return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * One chat completion for `task` (kg | question | grade | grade_escalation | title ...), recorded
+ * in the call log (model actually used, tokens, usage.cost, latency, ok/error, resource/session).
+ */
+export type TaskCompletion = ChatCompletion & {
+  /** Call-log row id of this completion (for setCallOutcome), null when the log is not attached. */
+  callId: number | null;
+};
+
+export async function chatCompletion(
+  task: string,
+  spec: ModelSpec,
+  req: ChatRequest,
+  opts: ChatCallOptions = {},
+): Promise<TaskCompletion> {
+  const body = buildChatBody(spec, req, opts.modelOverride);
+  const requested = String(body.model);
+  const once = async (client: OpenAI): Promise<TaskCompletion> => {
+    const t0 = Date.now();
+    try {
+      const completion = (await client.chat.completions.create(body as never)) as unknown as ChatCompletion;
+      const usage = ((completion as { usage?: Record<string, unknown> }).usage ?? {}) as Record<string, unknown>;
+      const callId = recordCall({
+        task,
+        model: typeof completion?.model === "string" && completion.model ? completion.model : requested,
+        requestedModel: requested,
+        inputTokens: usage.prompt_tokens as number | undefined,
+        outputTokens: usage.completion_tokens as number | undefined,
+        costUsd: usage.cost as number | undefined,
+        latencyMs: Date.now() - t0,
+        ok: true,
+        outcome: opts.outcome,
+      });
+      return Object.assign(completion, { callId });
+    } catch (err) {
+      recordCall({ task, requestedModel: requested, latencyMs: Date.now() - t0, ok: false, error: describeError(err) });
+      throw err;
+    }
+  };
+  return opts.resilient === false ? once(getOpenAIClient()) : callLLM(once);
+}
+
+/**
+ * JSON object from an LLM reply: plain JSON, JSON in a ```json fence, or the outermost {...} in
+ * surrounding prose (models without native JSON mode). Throws SyntaxError when there is none.
+ */
+export function extractJSONObject(text: string): Record<string, unknown> {
+  const trimmed = (text ?? "").trim();
+  const candidates: string[] = [trimmed];
+  const fence = /```(?:json)?\s*([\s\S]*?)```/i.exec(trimmed);
+  if (fence) candidates.push(fence[1].trim());
+  const first = trimmed.indexOf("{");
+  const last = trimmed.lastIndexOf("}");
+  if (first >= 0 && last > first) candidates.push(trimmed.slice(first, last + 1));
+  for (const c of candidates) {
+    try {
+      const parsed = JSON.parse(c);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
+    } catch {
+      // try the next candidate
+    }
+  }
+  throw new SyntaxError("No JSON object in LLM response");
 }

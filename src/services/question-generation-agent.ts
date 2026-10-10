@@ -18,12 +18,10 @@
  *         targetConcept, and (for MCQ/TF) options + correctAnswer.
  */
 
-import { readFileSync } from "fs";
-import * as path from "path";
-import * as yaml from "js-yaml";
-import { callLLM } from "./llm-client";
+import { chatCompletion, extractJSONObject } from "./llm-client";
 import { getConceptsByDifficulty, getConceptWithEdges } from "./kg-store";
-import { difficultyToBloom } from "./irt-engine";
+import { bloomTargetFor, capBloomLevel } from "./irt-engine";
+import { modelSpec, promptFor } from "./ai-config";
 import { KGNode, KGEdge } from "./kg-builder";
 import { QuestionType, GenerationOpts } from "../sdk/types";
 
@@ -36,23 +34,13 @@ export interface GeneratedQuestion {
   type: QuestionType;
   options?: string[];
   correctAnswer?: string;
-  /** Key points a correct open answer must cover (for claim-based grading). */
+  /** Key points a correct open answer must cover (checked one by one by the grader). */
   referenceKeyPoints?: string[];
+  /** Short complete answer (1–3 sentences) for open questions, shown to the learner after grading. */
+  modelAnswer?: string;
   /** Pre-formatted concept label + edge context passed to the grader. */
   conceptContext?: string;
 }
-
-interface AIConfig {
-  ["kaqg-model"]: string;
-  ["kaqg-prompt"]: string;
-  ["kaqg-mcq-model"]: string;
-  ["kaqg-mcq-prompt"]: string;
-  ["kaqg-tf-model"]: string;
-  ["kaqg-tf-prompt"]: string;
-}
-
-const configPath = path.resolve(__dirname, "..", "..", "ai-config.yml");
-const aiConfig = yaml.load(readFileSync(configPath, "utf8")) as AIConfig;
 
 const MAX_RETRIES = 3;
 const JACCARD_THRESHOLD = 0.45;
@@ -127,7 +115,7 @@ function buildSystemPrompt(base: string, opts?: GenerationOpts): string {
 function buildUserMessage(
   targetBloom: string, conceptsCtx: string, subgraphCtx: string, prevCtx: string,
   content: string, opts?: GenerationOpts, edgeDirection?: 'direct' | 'incoming' | 'outgoing',
-  targetDifficulty?: number
+  targetDifficulty?: number, tfTarget?: boolean
 ): string {
   // TARGET_DIFFICULTY gives the LLM the numeric scale for its own "difficulty" rating (which is
   // then anchored to this target by the session — see anchorItemDifficulty in irt-engine.ts).
@@ -140,6 +128,10 @@ function buildUserMessage(
   } else if (edgeDirection === 'outgoing') {
     msg += `EDGE_FOCUS: This is a re-ask. Focus on what this concept ENABLES, PRODUCES, or CAUSES — its consequences and applications.\n\n`;
   }
+  if (typeof tfTarget === "boolean") {
+    // Decided by the engine (50/50) so a session gets roughly as many false statements as true ones.
+    msg += `TARGET_ANSWER: ${tfTarget ? "TRUE" : "FALSE"} — write a statement that is ${tfTarget ? "TRUE" : "FALSE"} according to CONTENT_TEXT.\n\n`;
+  }
   msg += opts?.language
     ? `LANGUAGE: Generate the question in ${opts.language}.\n\n`
     : `LANGUAGE: Generate the question in the same language as the content.\n\n`;
@@ -150,14 +142,10 @@ function buildUserMessage(
 function buildUserMessageWithFeedback(
   targetBloom: string, conceptsCtx: string, subgraphCtx: string, prevCtx: string,
   content: string, feedback: string, opts?: GenerationOpts, edgeDirection?: 'direct' | 'incoming' | 'outgoing',
-  targetDifficulty?: number
+  targetDifficulty?: number, tfTarget?: boolean
 ): string {
-  const base = buildUserMessage(targetBloom, conceptsCtx, subgraphCtx, prevCtx, content, opts, edgeDirection, targetDifficulty);
+  const base = buildUserMessage(targetBloom, conceptsCtx, subgraphCtx, prevCtx, content, opts, edgeDirection, targetDifficulty, tfTarget);
   return `${base}\n\nEVALUATOR_FEEDBACK (previous attempt was rejected — address these issues):\n${feedback}`;
-}
-
-function resolveModel(configKey: string, opts?: GenerationOpts): string {
-  return opts?.model || (aiConfig as any)[configKey];
 }
 
 async function buildContext(
@@ -167,7 +155,8 @@ async function buildContext(
   targetConceptId?: string,
   edgeDirection?: 'direct' | 'incoming' | 'outgoing'
 ) {
-  const targetBloom = difficultyToBloom(targetDifficulty);
+  // Question targets stop at Analyze (no Evaluate/Create questions).
+  const targetBloom = bloomTargetFor(targetDifficulty);
 
   let conceptsCtx: string;
   let subgraphCtx: string;
@@ -214,10 +203,13 @@ async function buildContext(
 
 // ─── Parsers ─────────────────────────────────────────────────────────────────
 
+const strings = (v: unknown): string[] | undefined =>
+  Array.isArray(v) ? v.map(x => String(x ?? "").trim()).filter(Boolean) : undefined;
+
 function parseOpenPayload(payload: string, fallbackDiff: number, fallbackBloom: string): GeneratedQuestion {
   let parsed: Record<string, unknown>;
   try {
-    parsed = JSON.parse(payload);
+    parsed = extractJSONObject(payload);
   } catch {
     // Truncated JSON fallback — extract fields via regex when LLM cuts off mid-array
     const qMatch = payload.match(/"question"\s*:\s*"((?:[^"\\]|\\.)*)"/);
@@ -225,40 +217,43 @@ function parseOpenPayload(payload: string, fallbackDiff: number, fallbackBloom: 
     const conceptMatch = payload.match(/"targetConcept"\s*:\s*"((?:[^"\\]|\\.)*)"/);
     const bloomMatch   = payload.match(/"bloomLevel"\s*:\s*"((?:[^"\\]|\\.)*)"/);
     const diffMatch    = payload.match(/"difficulty"\s*:\s*([-\d.]+)/);
-    const kpSection    = payload.match(/"referenceKeyPoints"\s*:\s*\[(.*)/s)?.[1] ?? "";
+    const answerMatch  = payload.match(/"modelAnswer"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+    const kpSection    = payload.match(/"(?:keyPoints|referenceKeyPoints)"\s*:\s*\[([^\]]*)/s)?.[1] ?? "";
     const kpItems      = [...kpSection.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map(m => m[1]).filter(Boolean);
     parsed = {
       question:          qMatch[1],
       targetConcept:     conceptMatch?.[1] ?? "unknown",
       bloomLevel:        bloomMatch?.[1] ?? fallbackBloom,
       difficulty:        diffMatch ? parseFloat(diffMatch[1]) : fallbackDiff,
-      referenceKeyPoints: kpItems.length > 0 ? kpItems : undefined,
+      modelAnswer:       answerMatch?.[1],
+      keyPoints:         kpItems.length > 0 ? kpItems : undefined,
     };
   }
-  const referenceKeyPoints = Array.isArray(parsed.referenceKeyPoints)
-    ? (parsed.referenceKeyPoints as unknown[]).map(String).filter(Boolean)
-    : undefined;
+  const keyPoints = strings(parsed.keyPoints) ?? strings(parsed.referenceKeyPoints);
+  const modelAnswer = typeof parsed.modelAnswer === "string" && parsed.modelAnswer.trim()
+    ? parsed.modelAnswer.trim() : undefined;
   return {
-    question: String(parsed.question || ""),
+    question: String(parsed.question || "").trim(),
     targetConcept: String(parsed.targetConcept || "unknown"),
-    bloomLevel: (parsed.bloomLevel as string) || fallbackBloom,
+    bloomLevel: capBloomLevel((parsed.bloomLevel as string) || fallbackBloom),
     difficulty: typeof parsed.difficulty === "number" ? parsed.difficulty : fallbackDiff,
     type: "open",
-    referenceKeyPoints,
+    referenceKeyPoints: keyPoints && keyPoints.length > 0 ? keyPoints : undefined,
+    modelAnswer,
   };
 }
 
 function parseMCQPayload(payload: string, fallbackDiff: number, fallbackBloom: string): GeneratedQuestion {
-  const parsed = JSON.parse(payload);
+  const parsed = extractJSONObject(payload) as Record<string, any>;
   const stripPrefix = (s: string) => s.replace(/^[A-Da-d][\.\)]\s*/, "").trim();
   const options = Array.isArray(parsed.options) ? parsed.options.map((s: unknown) => stripPrefix(String(s))) : [];
   if (options.length !== 4) throw new Error("MCQ must have exactly 4 options");
   const correctAnswer = String(parsed.correctAnswer || "A").toUpperCase();
   if (!["A", "B", "C", "D"].includes(correctAnswer)) throw new Error("Invalid correctAnswer");
   return {
-    question: String(parsed.question || ""),
+    question: String(parsed.question || "").trim(),
     targetConcept: String(parsed.targetConcept || "unknown"),
-    bloomLevel: parsed.bloomLevel || fallbackBloom,
+    bloomLevel: capBloomLevel(parsed.bloomLevel || fallbackBloom),
     difficulty: typeof parsed.difficulty === "number" ? parsed.difficulty : fallbackDiff,
     type: "mcq",
     options,
@@ -267,14 +262,14 @@ function parseMCQPayload(payload: string, fallbackDiff: number, fallbackBloom: s
 }
 
 function parseTFPayload(payload: string, fallbackDiff: number, fallbackBloom: string): GeneratedQuestion {
-  const parsed = JSON.parse(payload);
+  const parsed = extractJSONObject(payload) as Record<string, any>;
   const correctAnswer = typeof parsed.correctAnswer === "boolean"
     ? String(parsed.correctAnswer)
     : String(parsed.correctAnswer || "true").toLowerCase();
   return {
-    question: String(parsed.statement || parsed.question || ""),
+    question: String(parsed.statement || parsed.question || "").trim(),
     targetConcept: String(parsed.targetConcept || "unknown"),
-    bloomLevel: parsed.bloomLevel || fallbackBloom,
+    bloomLevel: capBloomLevel(parsed.bloomLevel || fallbackBloom),
     difficulty: typeof parsed.difficulty === "number" ? parsed.difficulty : fallbackDiff,
     type: "true_false",
     correctAnswer,
@@ -338,13 +333,23 @@ export class QuestionGenerationAgent {
     const { contentId, contentText, targetDifficulty, previousQuestions, qType, opts, evaluatorFeedback, targetConceptId, edgeDirection } = params;
 
     const ctx = await buildContext(contentId, targetDifficulty, previousQuestions, targetConceptId, edgeDirection);
+    const tfTarget = qType === "true_false" ? Math.random() < 0.5 : undefined;
+
+    // Questions rejected as near-duplicates of PREVIOUS_QUESTIONS. Named in the retry prompt: some
+    // models ignore temperature (e.g. Claude Haiku 5.5 via OpenRouter), so a hotter retry alone
+    // would just repeat the same question.
+    const duplicates: string[] = [];
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       const temperature = 0.3 + attempt * 0.25;
 
-      const userMsg = evaluatorFeedback && attempt === 0
-        ? buildUserMessageWithFeedback(ctx.targetBloom, ctx.conceptsCtx, ctx.subgraphCtx, ctx.prevCtx, contentText, evaluatorFeedback, opts, edgeDirection, targetDifficulty)
-        : buildUserMessage(ctx.targetBloom, ctx.conceptsCtx, ctx.subgraphCtx, ctx.prevCtx, contentText, opts, edgeDirection, targetDifficulty);
+      let userMsg = evaluatorFeedback && attempt === 0
+        ? buildUserMessageWithFeedback(ctx.targetBloom, ctx.conceptsCtx, ctx.subgraphCtx, ctx.prevCtx, contentText, evaluatorFeedback, opts, edgeDirection, targetDifficulty, tfTarget)
+        : buildUserMessage(ctx.targetBloom, ctx.conceptsCtx, ctx.subgraphCtx, ctx.prevCtx, contentText, opts, edgeDirection, targetDifficulty, tfTarget);
+      if (duplicates.length > 0) {
+        userMsg += `\n\nREJECTED_AS_DUPLICATE (too close to a previous question — ask about a different fact, person or event from CONTENT_TEXT):\n` +
+          duplicates.map(q => `- ${q}`).join("\n");
+      }
 
       let result: GeneratedQuestion;
       try {
@@ -366,6 +371,7 @@ export class QuestionGenerationAgent {
         if (ctx.conceptContext) result.conceptContext = ctx.conceptContext;
         return result;
       }
+      duplicates.push(result.question);
     }
 
     throw new QuestionGenerationError(`Failed to generate a unique ${qType} question after ${MAX_RETRIES} retries`);
@@ -388,18 +394,17 @@ export class QuestionGenerationAgent {
       default:           modelKey = "kaqg-model";      promptKey = "kaqg-prompt";
     }
 
-    const completion = await callLLM(c => c.chat.completions.create({
-      model: resolveModel(modelKey, opts),
+    const completion = await chatCompletion("question", modelSpec(modelKey), {
       temperature,
       max_tokens: qType === "open" ? 1024 : undefined,
       response_format: { type: "json_object" },
       messages: [
-        { role: "system", content: buildSystemPrompt((aiConfig as any)[promptKey], opts) },
+        { role: "system", content: buildSystemPrompt(promptFor(promptKey), opts) },
         { role: "user", content: userMsg },
       ],
-    }));
+    }, { modelOverride: opts?.model });
 
-    const payload = completion.choices[0].message.content || "";
+    const payload = completion.choices?.[0]?.message?.content || "";
 
     switch (qType) {
       case "mcq":        return parseMCQPayload(payload, fallbackDiff, fallbackBloom);

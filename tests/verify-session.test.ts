@@ -638,7 +638,7 @@ describe("VerifySession — fixed length, allowed types, difficulty", () => {
       return { session, user: calls[0].user, kind: calls[0].kind };
     };
 
-    it("shifts the Bloom target and type of the first question: easy → Understand/TF, medium → Understand/MCQ, hard → Apply/MCQ, max → Evaluate/open", async () => {
+    it("shifts the Bloom target and type of the first question: easy → Understand/TF, medium → Understand/MCQ, hard → Apply/MCQ, max → Analyze/open (capped)", async () => {
       const all: QuestionType[] = ["open", "mcq", "true_false"];
       const easy = await firstQuestion({ difficulty: 0.2, q_types: all });
       expect(easy.user).to.contain("TARGET_BLOOM_LEVEL: Understand");
@@ -655,7 +655,7 @@ describe("VerifySession — fixed length, allowed types, difficulty", () => {
       expect(hard.kind).to.equal("mcq");
 
       const max = await firstQuestion({ difficulty: 1, q_types: all });
-      expect(max.user).to.contain("TARGET_BLOOM_LEVEL: Evaluate");
+      expect(max.user).to.contain("TARGET_BLOOM_LEVEL: Analyze");
       expect(max.kind).to.equal("open");
     });
 

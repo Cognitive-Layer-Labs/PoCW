@@ -5,10 +5,8 @@
  * using an LLM, producing a structured graph for KAQG question generation.
  */
 
-import { readFileSync } from "fs";
-import * as path from "path";
-import * as yaml from "js-yaml";
-import { getOpenAIClient } from "./llm-client";
+import { chatCompletion, extractJSONObject } from "./llm-client";
+import { modelSpec, promptFor } from "./ai-config";
 
 export interface KGNode {
   id: string;
@@ -29,13 +27,8 @@ export interface KnowledgeGraph {
   edges: KGEdge[];
 }
 
-interface KGConfig {
-  ["kg-model"]: string;
-  ["kg-prompt"]: string;
-}
-
-const configPath = path.resolve(__dirname, "..", "..", "ai-config.yml");
-const config = yaml.load(readFileSync(configPath, "utf8")) as KGConfig;
+/** Output budget per extraction call (room for "low" reasoning plus a 10–20 concept graph). */
+const KG_MAX_TOKENS = 8000;
 
 /**
  * Extract a knowledge graph from content text using the LLM (importance normalised to [0, 1]).
@@ -56,23 +49,26 @@ export async function extractRawKnowledgeGraph(
   contentId: number,
   contentText: string
 ): Promise<KnowledgeGraph> {
-  const completion = await getOpenAIClient().chat.completions.create({
-    model: config["kg-model"],
+  // Called once per chunk (no breaker/retry here): buildKnowledgeGraph retries a failed chunk once.
+  const completion = await chatCompletion("kg", modelSpec("kg-model"), {
     temperature: 0,
+    max_tokens: KG_MAX_TOKENS,
     response_format: { type: "json_object" },
     messages: [
       {
         role: "system",
-        content: config["kg-prompt"]
+        content: promptFor("kg-prompt")
       },
       {
         role: "user",
         content: `Content:\n${contentText}`
       }
     ]
-  });
+  }, { resilient: false });
 
-  const payload = completion.choices[0].message.content || "";
+  const payload = completion.choices?.[0]?.message?.content || "";
+  // No JSON at all (truncated / refused): fail so the chunk is retried instead of silently empty.
+  extractJSONObject(payload);
   return parseKGPayloadRaw(contentId, payload);
 }
 
@@ -122,7 +118,7 @@ export function parseKGPayloadRaw(contentId: number, payload: string): Knowledge
   ]);
 
   try {
-    const parsed = JSON.parse(payload);
+    const parsed = extractJSONObject(payload) as Record<string, any>;
 
     const nodes: KGNode[] = (parsed.nodes || [])
       .map((n: any, i: number) => ({

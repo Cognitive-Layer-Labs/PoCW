@@ -154,6 +154,7 @@ export interface VerifyQuestion {
 export interface AnswerFeedback {
   correct: boolean;
   score: number;
+  /** Short explanation. Open answers: derived from keyPoints ("You covered 2 of 3 key points."). */
   reasoning: string;
   dimensions?: {
     covered_points: number;
@@ -173,6 +174,12 @@ export interface AnswerFeedback {
   };
   /** Reference key points for open questions (from question generation). */
   referenceKeyPoints?: string[];
+  /** Open answers: how the learner's answer did on each reference key point. */
+  keyPoints?: Array<{ point: string; status: "covered" | "partial" | "missing" }>;
+  /** Open answers: a short complete answer (1–3 sentences), generated with the question. */
+  modelAnswer?: string;
+  /** Open answers: which grader decided — "jev" (decisions model) or "llm" (LLM grader / escalation). */
+  gradedBy?: "jev" | "llm";
   /** Correct answer text for MCQ / true_false questions. */
   correctAnswer?: string;
   progress: {

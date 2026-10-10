@@ -9,6 +9,9 @@ import { initSessionStore, saveSession, loadSession } from "./services/session-s
 import { getFullGraph, isFalkorAvailable } from "./services/kg-store";
 import { getContent, updateMetadata } from "./sdk/content-store";
 import { rederiveTitle, parseUpload, UploadParseError } from "./services/parser";
+import { runWithUsageContext } from "./services/usage-context";
+import { getUsageSummary, USAGE_RETENTION_DAYS } from "./services/usage-store";
+import { getKeyStatus } from "./services/openrouter-key";
 
 const app = express();
 app.disable("x-powered-by");
@@ -404,7 +407,7 @@ app.patch("/api/index/:knowledgeId/title", async (req: Request, res: Response) =
 
   if (!title && row.content_type === "url") {
     try {
-      title = (await rederiveTitle(row.source)) ?? undefined;
+      title = (await runWithUsageContext({ knowledgeId: row.knowledge_id }, () => rederiveTitle(row.source))) ?? undefined;
     } catch {
       // derivation failed — fall through to error below
     }
@@ -552,6 +555,27 @@ app.get("/api/graph/:knowledgeId", async (req: Request, res: Response) => {
 
   try {
     return res.json(await getFullGraph(contentId));
+  } catch (err) {
+    return sendError(res, err);
+  }
+});
+
+// ─── Usage (operator, server-to-server) ──────────────────────────────────────
+
+/**
+ * GET /api/usage?days=30
+ * LLM / decisions spend from the call log (last `days` UTC days incl. today, 1–90) plus the live
+ * OpenRouter key status (cached ~60 s). Bearer POCW_API_KEY like every /api route; meant for the
+ * operator dashboard's server — never proxy it to browsers.
+ */
+app.get("/api/usage", async (req: Request, res: Response) => {
+  const raw = typeof req.query.days === "string" ? parseInt(req.query.days, 10) : NaN;
+  const days = Number.isFinite(raw) ? Math.max(1, Math.min(USAGE_RETENTION_DAYS, raw)) : 30;
+  try {
+    const summary = getUsageSummary(days);
+    const key = await getKeyStatus();
+    res.set("Cache-Control", "no-store");
+    return res.json({ days, key, ...summary });
   } catch (err) {
     return sendError(res, err);
   }

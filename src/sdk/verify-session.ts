@@ -11,7 +11,7 @@ import {
   updateAbility,
   selectNextQuestion,
   thetaToScore,
-  difficultyToBloom,
+  bloomTargetFor,
   isAberrant,
   questionTypeC,
   difficultyOffset,
@@ -34,6 +34,8 @@ import {
 } from "../services/question-generator";
 import { selectChunkIndex, chunksMentioning } from "../services/session-manager";
 import { getContent } from "./content-store";
+import { runWithUsageContext } from "../services/usage-context";
+import { recordSessionFinished } from "../services/usage-store";
 import {
   ResolvedConfig,
   QuestionType,
@@ -119,7 +121,7 @@ export interface SessionSnapshot {
   currentQuestion: {
     question: string; targetConcept: string; bloomLevel: string; difficulty: number;
     type: QuestionType; options?: string[]; correctAnswer?: string;
-    referenceKeyPoints?: string[]; conceptContext?: string;
+    referenceKeyPoints?: string[]; conceptContext?: string; modelAnswer?: string;
   } | null;
   currentChunkIndex: number;
   targetDifficulties: number[];
@@ -179,8 +181,17 @@ export class VerifySession {
     };
   }
 
+  /** Calls made inside `fn` are logged against this session (GET /api/usage perSession). */
+  private withUsageContext<T>(fn: () => Promise<T>): Promise<T> {
+    return runWithUsageContext({ sessionId: this.sessionId, knowledgeId: this.knowledgeId }, fn);
+  }
+
   /** Generate the first question. Must be called after construction. */
-  async init(): Promise<void> {
+  init(): Promise<void> {
+    return this.withUsageContext(() => this.initQuestions());
+  }
+
+  private async initQuestions(): Promise<void> {
     // Load important concepts for the mastery loop
     const importantNodes = await getImportantConcepts(
       this.contentId, this.config.importance_threshold, MIN_IMPORTANT_CONCEPTS
@@ -272,7 +283,11 @@ export class VerifySession {
   }
 
   /** Submit an answer and get feedback. */
-  async submitAnswer(answer: string): Promise<AnswerFeedback> {
+  submitAnswer(answer: string): Promise<AnswerFeedback> {
+    return this.withUsageContext(() => this.gradeAndAdvance(answer));
+  }
+
+  private async gradeAndAdvance(answer: string): Promise<AnswerFeedback> {
     if (!this._currentQuestion) {
       throw new PoCWError("SESSION_NOT_ACTIVE", "No current question to answer");
     }
@@ -362,7 +377,7 @@ export class VerifySession {
       questionNumber,
       theta: this.irtState.theta,
       se: this.irtState.se,
-      bloomLevel: difficultyToBloom(this.irtState.theta),
+      bloomLevel: bloomTargetFor(this.irtState.theta),
     };
 
     // The session is fixed-length: it ends after exactly maxQuestions answers. IRT convergence
@@ -373,6 +388,7 @@ export class VerifySession {
     if (isComplete) {
       this._complete = true;
       this._currentQuestion = null;
+      recordSessionFinished(this.sessionId, this.knowledgeId);
     } else {
       await this._generateNextQuestion();
     }
@@ -384,6 +400,9 @@ export class VerifySession {
       dimensions: gradeResult.dimensions,
       irtParams,
       referenceKeyPoints: currentQ.type === "open" ? currentQ.referenceKeyPoints : undefined,
+      keyPoints: currentQ.type === "open" ? gradeResult.keyPoints : undefined,
+      modelAnswer: currentQ.type === "open" ? currentQ.modelAnswer : undefined,
+      gradedBy: currentQ.type === "open" ? gradeResult.gradedBy : undefined,
       correctAnswer: (currentQ.type === "mcq" || currentQ.type === "true_false") ? currentQ.correctAnswer : undefined,
       progress,
       isComplete,

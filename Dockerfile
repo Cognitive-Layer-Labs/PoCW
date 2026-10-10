@@ -27,7 +27,7 @@ WORKDIR /app
 
 COPY --from=prod-deps --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist ./dist
-COPY --chown=node:node package.json ai-config.yml ./
+COPY --chown=node:node package.json ai-config.yml ai-config.baseline.yml ./
 COPY --chown=node:node public ./public
 RUN mkdir -p /app/data /app/tmp && chown node:node /app/data /app/tmp
 

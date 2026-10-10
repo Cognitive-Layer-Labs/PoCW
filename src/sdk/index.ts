@@ -12,6 +12,7 @@ import { prepareText, DocumentMeta } from "../services/book-text";
 import { buildKnowledgeGraph } from "../services/kg-builder";
 import { storeGraph, graphExists, initFalkorDB, closeFalkorDB, deleteGraph, wipeAllGraphs } from "../services/kg-store";
 import { contentUrlToId } from "../services/session-manager";
+import { runWithUsageContext } from "../services/usage-context";
 import {
   initContentStore,
   closeContentStore,
@@ -402,7 +403,19 @@ class PoCW {
 
   // ─── Private ─────────────────────────────────────────────────────────────
 
-  private async runIndexing(
+  private runIndexing(
+    knowledgeId: string,
+    source: string,
+    contentId: number,
+    contentType: string,
+    meta?: DocumentMeta
+  ): Promise<void> {
+    // Every LLM call made while indexing is logged against this resource (GET /api/usage perBook).
+    return runWithUsageContext({ knowledgeId, sessionId: null }, () =>
+      this.runIndexingJob(knowledgeId, source, contentId, contentType, meta));
+  }
+
+  private async runIndexingJob(
     knowledgeId: string,
     source: string,
     contentId: number,
@@ -531,27 +544,9 @@ async function deriveWebTitle(
   url: string,
   text: string
 ): Promise<string> {
-  try {
-    const { getOpenAIClient } = await import("../services/llm-client");
-    const snippet = text.slice(0, 4000);
-    const prompt = [
-      `Given the following information about a web page, provide a concise, accurate title (under 120 characters). Reply with ONLY the title — no quotes, no explanation.`,
-      `URL: ${url}`,
-      htmlTitle ? `HTML <title>: ${htmlTitle}` : null,
-      `Content excerpt:\n${snippet}`,
-    ].filter(Boolean).join("\n");
-
-    const completion = await getOpenAIClient().chat.completions.create({
-      model: "google/gemini-2.5-flash",
-      max_tokens: 80,
-      temperature: 0,
-      messages: [{ role: "user", content: prompt }],
-    });
-    const result = (completion.choices[0]?.message?.content ?? "").trim();
-    if (result.length > 5 && result.length < 200) return result;
-  } catch {
-    // LLM unavailable — use fallback chain
-  }
+  const { deriveTitleWithLLM } = await import("../services/title");
+  const result = await deriveTitleWithLLM({ url, htmlTitle, text });
+  if (result) return result;
   // Fallback: htmlTitle → first line of text → URL
   if (htmlTitle && htmlTitle.length > 5) return htmlTitle.slice(0, 200);
   const lines = text.split(/\n+/).map(l => l.trim()).filter(Boolean);

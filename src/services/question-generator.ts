@@ -13,12 +13,17 @@
  *   Generation Agent ──► Evaluation Agent ──► pass? ──► return to CAT session
  *         ▲                                        │
  *         └──────────── retry with feedback ───────┘ (max 2 eval retries)
+ *
+ * (The LLM Evaluation Agent only runs when question-eval-model is set.) Then the question check
+ * (question-check.ts, decisions model): if it flags the question, it is regenerated ONCE with the
+ * check's feedback; a failed check or a failed regeneration keeps the original question.
  */
 
 import { QuestionType, GenerationOpts } from "../sdk/types";
 import { QuestionGenerationAgent, QuestionGenerationError, GeneratedQuestion } from "./question-generation-agent";
 import { QuestionEvaluationAgent, GradeResult } from "./question-evaluation-agent";
-import { difficultyToBloom } from "./irt-engine";
+import { bloomTargetFor } from "./irt-engine";
+import { checkQuestion } from "./question-check";
 
 // ─── Re-export types so callers don't need to change imports ─────────────────
 
@@ -37,14 +42,12 @@ const MAX_EVAL_RETRIES = 2;
 // ─── Generate-evaluate loop ───────────────────────────────────────────────────
 
 /**
- * Generate a single question and verify its quality.
+ * Generate a single question and check it before it is shown.
  *
- * Loop:
- *   1. Generation Agent produces a question at targetDifficulty / targetBloom.
- *   2. Evaluation Agent checks quality (answerability, Bloom match, MCQ distractors).
- *   3. If quality check passes → return question.
- *   4. If fails → pass evaluator feedback back to Generation Agent and retry.
- * Max eval retries: 2 (after that, accept whatever passes format validation).
+ *   1. generateEvaluated(): Generation Agent (+ the optional LLM Evaluation Agent loop).
+ *   2. Question check (decisions model, question-check.ts). If it flags the question (wrong MCQ
+ *      key, not answerable from the passage, not plainly worded), regenerate ONCE with its
+ *      feedback and use the result unchecked. A failed check or regeneration keeps the original.
  */
 export async function generateQuestion(
   contentId: number,
@@ -56,7 +59,47 @@ export async function generateQuestion(
   targetConceptId?: string,
   edgeDirection?: 'direct' | 'incoming' | 'outgoing'
 ): Promise<GeneratedQuestion> {
-  const targetBloom = difficultyToBloom(targetDifficulty);
+  const question = await generateEvaluated(
+    contentId, contentText, targetDifficulty, previousQuestions, qType, opts, targetConceptId, edgeDirection,
+  );
+
+  const check = await checkQuestion(question, contentText);
+  if (check.status !== "regenerate") return question;
+  try {
+    return await generationAgent.generate({
+      contentId,
+      contentText,
+      targetDifficulty,
+      previousQuestions: [...previousQuestions, question.question],
+      qType,
+      opts,
+      evaluatorFeedback: check.feedback,
+      targetConceptId,
+      edgeDirection,
+    });
+  } catch (err) {
+    console.warn(`[question-generator] regeneration after the question check failed, keeping the original: ${err instanceof Error ? err.message : err}`);
+    return question;
+  }
+}
+
+/**
+ * Generation + optional LLM quality evaluation (only when question-eval-model is set):
+ *   1. Generation Agent produces a question at targetDifficulty / targetBloom.
+ *   2. Evaluation Agent checks quality (answerability, Bloom match, MCQ distractors).
+ *   3. Pass → return; fail → retry with the evaluator's feedback (max 2 eval retries, then accept).
+ */
+async function generateEvaluated(
+  contentId: number,
+  contentText: string,
+  targetDifficulty: number,
+  previousQuestions: string[],
+  qType: QuestionType,
+  opts: GenerationOpts | undefined,
+  targetConceptId: string | undefined,
+  edgeDirection: 'direct' | 'incoming' | 'outgoing' | undefined,
+): Promise<GeneratedQuestion> {
+  const targetBloom = bloomTargetFor(targetDifficulty);
   let evaluatorFeedback: string | undefined;
 
   for (let evalAttempt = 0; evalAttempt <= MAX_EVAL_RETRIES; evalAttempt++) {

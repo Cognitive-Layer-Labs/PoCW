@@ -286,7 +286,7 @@ export function selectNextQuestion(
     const concept = failed[0];
     const edge: 'incoming' | 'outgoing' = concept.askCount === 1 ? 'incoming' : 'outgoing';
     const b = itemTarget(theta, concept.importance, offset);
-    return { targetConceptId: concept.conceptId, edgeDirection: edge, b_target: b, bloomTarget: difficultyToBloom(b) };
+    return { targetConceptId: concept.conceptId, edgeDirection: edge, b_target: b, bloomTarget: bloomTargetFor(b) };
   }
 
   const untested = [...conceptMastery.values()]
@@ -296,12 +296,12 @@ export function selectNextQuestion(
   if (untested.length > 0) {
     const concept = untested[0];
     const b = itemTarget(theta, concept.importance, offset);
-    return { targetConceptId: concept.conceptId, edgeDirection: 'direct', b_target: b, bloomTarget: difficultyToBloom(b) };
+    return { targetConceptId: concept.conceptId, edgeDirection: 'direct', b_target: b, bloomTarget: bloomTargetFor(b) };
   }
 
   // All resolved — Fisher mode: no concept, so no importance nudge
   const b = itemTarget(theta, null, offset);
-  return { targetConceptId: null, edgeDirection: 'direct', b_target: b, bloomTarget: difficultyToBloom(b) };
+  return { targetConceptId: null, edgeDirection: 'direct', b_target: b, bloomTarget: bloomTargetFor(b) };
 }
 
 /**
@@ -348,6 +348,23 @@ export function difficultyToBloom(difficulty: number): string {
   if (difficulty < 1.0)  return "Analyze";
   if (difficulty < 1.5)  return "Evaluate";
   return "Create";
+}
+
+/** Highest Bloom level questions are generated for. Evaluate/Create questions tended to come out
+ *  academic and convoluted; difficulty now changes depth up to Analyze. */
+export const MAX_TARGET_BLOOM = "Analyze";
+const BLOOM_LEVELS = ["Remember", "Understand", "Apply", "Analyze", "Evaluate", "Create"];
+
+/** Bloom level ≤ MAX_TARGET_BLOOM (Evaluate/Create → Analyze); unknown values pass through. */
+export function capBloomLevel(level: string): string {
+  const i = BLOOM_LEVELS.indexOf(level);
+  const max = BLOOM_LEVELS.indexOf(MAX_TARGET_BLOOM);
+  return i > max ? MAX_TARGET_BLOOM : level;
+}
+
+/** Bloom target for a question at IRT difficulty b: difficultyToBloom capped at MAX_TARGET_BLOOM. */
+export function bloomTargetFor(difficulty: number): string {
+  return capBloomLevel(difficultyToBloom(difficulty));
 }
 
 export function bloomToDifficulty(bloomLevel: string): number {

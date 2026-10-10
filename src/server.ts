@@ -6,6 +6,7 @@ dotenv.config({ path: path.resolve(__dirname, "..", ".env") });
 
 import app, { setPoCWInstance, initAppServices } from "./app";
 import { PoCW } from "./sdk/index";
+import { decisionsModel, loadAIConfig, modelSpec, titleModelSpec } from "./services/ai-config";
 
 const PORT = Number(process.env.PORT || 3000);
 const PRIMARY_DB_PATH = process.env.POCW_DB_PATH || path.resolve(process.cwd(), "data", "pocw.db");
@@ -35,6 +36,19 @@ async function start(): Promise<void> {
   }
   if (!process.env.ADMIN_API_KEY) {
     console.log("[engine] ADMIN_API_KEY not set — admin API disabled.");
+  }
+
+  // Models + prompts (AI_CONFIG_PATH, default ai-config.yml): fail fast on a broken file.
+  try {
+    const cfg = loadAIConfig();
+    const m = (key: string) => modelSpec(key).model;
+    console.log(
+      `[engine] AI config ${cfg.path}: kg=${m("kg-model")} question=${m("kaqg-model")} ` +
+      `check=${decisionsModel("question-check-model") ?? "off"} grade=${decisionsModel("grade-decisions-model") ?? "llm"} ` +
+      `escalation=${m("grade-model")} title=${titleModelSpec().model}`,
+    );
+  } catch (err) {
+    fatal(`invalid AI config: ${describe(err)}`);
   }
 
   let pocw = new PoCW({ dbPath: PRIMARY_DB_PATH });

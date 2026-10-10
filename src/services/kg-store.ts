@@ -9,7 +9,7 @@
 
 import { FalkorDB, Graph } from "falkordb";
 import { KGNode, KGEdge, KnowledgeGraph } from "./kg-builder";
-import { difficultyToBloom } from "./irt-engine";
+import { bloomTargetFor } from "./irt-engine";
 import { PoCWError } from "../sdk/types";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -257,7 +257,7 @@ export async function getConceptsByDifficulty(
   if (!falkorAvailable) {
     return { concepts: [], subgraph: { nodes: [], edges: [] }, degraded: true };
   }
-  const targetBloom = difficultyToBloom(targetDifficulty);
+  const targetBloom = bloomTargetFor(targetDifficulty);
   const bloomOrder = ["Remember", "Understand", "Apply", "Analyze", "Evaluate", "Create"];
   const targetIdx = bloomOrder.indexOf(targetBloom);
 

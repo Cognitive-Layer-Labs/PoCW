@@ -355,24 +355,10 @@ export async function rederiveTitle(source: string, existingText?: string): Prom
     if (parsed.title) return parsed.title;
     const text = existingText ?? parsed.text;
 
-    // Call LLM (dynamic import to avoid circular deps from sdk/index.ts)
-    const { getOpenAIClient } = await import("./llm-client");
-    const snippet = text.slice(0, 4000);
-    const prompt = [
-      "Given the following information about a web page, provide a concise accurate title (under 120 characters). Reply with ONLY the title — no quotes, no explanation.",
-      `URL: ${source}`,
-      parsed.htmlTitle ? `HTML <title>: ${parsed.htmlTitle}` : null,
-      `Content excerpt:\n${snippet}`,
-    ].filter(Boolean).join("\n");
-
-    const completion = await getOpenAIClient().chat.completions.create({
-      model: "google/gemini-2.5-flash",
-      max_tokens: 80,
-      temperature: 0,
-      messages: [{ role: "user", content: prompt }],
-    });
-    const result = (completion.choices[0]?.message?.content ?? "").trim();
-    if (result.length > 5 && result.length < 200) return result;
+    // LLM title (title-model in the AI config). Dynamic import keeps the parser's import graph light.
+    const { deriveTitleWithLLM } = await import("./title");
+    const result = await deriveTitleWithLLM({ url: source, htmlTitle: parsed.htmlTitle, text });
+    if (result) return result;
 
     // LLM gave nothing useful — fall through to htmlTitle or first line
     if (parsed.htmlTitle && parsed.htmlTitle.length > 5) return parsed.htmlTitle.slice(0, 200);
