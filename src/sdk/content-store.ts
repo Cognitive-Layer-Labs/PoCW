@@ -13,6 +13,7 @@ import * as path from "path";
 import * as fs from "fs";
 import { ContentRow, IndexStatus } from "./types";
 import { attachUsageStore } from "../services/usage-store";
+import { cleanAuthorName, meaningfulMeta } from "../services/book-text";
 
 let db: Database.Database | null = null;
 
@@ -103,6 +104,14 @@ function migrate(database: Database.Database): void {
   if (existing.size === 0) return; // table not created yet (injected test databases)
   for (const [name, type] of ADDED_COLUMNS) {
     if (!existing.has(name)) database.exec(`ALTER TABLE content_index ADD COLUMN ${name} ${type}`);
+  }
+  // Authors stored before cleanAuthorName existed (e.g. Gutenberg's "active 6th century B.C. Sunzi").
+  const rows = database.prepare("SELECT knowledge_id, author FROM content_index WHERE author IS NOT NULL")
+    .all() as Array<{ knowledge_id: string; author: string }>;
+  const update = database.prepare("UPDATE content_index SET author = ? WHERE knowledge_id = ?");
+  for (const row of rows) {
+    const clean = meaningfulMeta(cleanAuthorName(row.author), "author") ?? null;
+    if (clean !== row.author) update.run(clean, row.knowledge_id);
   }
 }
 

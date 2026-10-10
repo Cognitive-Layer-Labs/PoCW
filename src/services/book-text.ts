@@ -90,7 +90,7 @@ export function parseGutenbergHeader(header: string): DocumentMeta {
   }
   return {
     title: title && title.length <= 300 ? title : undefined,
-    author: author && author.length <= 200 ? author : undefined,
+    author: author && author.length <= 200 ? cleanAuthorName(author) : undefined,
   };
 }
 
@@ -159,4 +159,44 @@ export function meaningfulMeta(value: unknown, kind: "title" | "author"): string
   if (v.length < 2 || v.length > (kind === "title" ? 300 : 200)) return undefined;
   const junk = kind === "title" ? JUNK_TITLE : JUNK_AUTHOR;
   return junk.some(re => re.test(v)) ? undefined : v;
+}
+
+// ─── Author names ────────────────────────────────────────────────────────────
+
+const ERA = String.raw`(?:B\.?\s?C\.?(?:E\.?)?|A\.?\s?D\.?|C\.?E\.?)`;
+const APPROX = String.raw`(?:approximately|approx\.|about|circa|ca\.|c\.)`;
+/** "6th century B.C.", "1832-1898", "1564?-1616", "-1616", "1200 A.D.", "1590s" */
+const DATE = String.raw`(?:\d{1,2}(?:st|nd|rd|th)\s+(?:century|cent\.?)|\d{1,4}s?\??(?:\s*[-–—]\s*(?:\d{1,4}\??)?)?|[-–—]\s*\d{1,4}\??)(?:\s+${ERA})?`;
+/** Catalogue qualifiers: "active 6th century B.C.", "fl. 1200", "b. 1564", "d. 1616", "1832-1898". */
+const QUALIFIER = String.raw`(?:(?:active|fl\.?|floruit|flourished|b\.|born|d\.|died)\s+)?(?:${APPROX}\s+)?${DATE}`;
+const QUALIFIER_SEGMENT = new RegExp(String.raw`^${QUALIFIER}$`, "i");
+/** Qualifier put in front of the name by a naive "Surname, qualifier" reorder (Project Gutenberg). */
+const LEADING_QUALIFIER = new RegExp(String.raw`^(?:active|fl\.?|floruit|flourished)\s+(?:${APPROX}\s+)?${DATE}\s+(?=\S)`, "i");
+const LEADING_DATES = new RegExp(String.raw`^\d{3,4}\??\s*[-–—]\s*(?:\d{2,4}\??)?\s+(?=\p{L})`, "u");
+const TRAILING_QUALIFIER = new RegExp(String.raw`\s+(?:(?:b\.|d\.|fl\.)\s*${DATE}|\d{3,4}\??\s*[-–—]\s*(?:\d{2,4}\??)?)$`, "i");
+const PARTICLE = `(?:${["de", "del", "della", "der", "den", "di", "da", "du", "la", "le", "van", "von", "ten", "ter", "al", "el", "bin", "ibn"]
+  .map(p => `[${p[0].toUpperCase()}${p[0]}]${p.slice(1)}`).join("|")})`;
+const SURNAME = new RegExp(String.raw`^(?:${PARTICLE}\s+)?\p{Lu}[\p{L}'’-]*$`, "u");
+const FORENAMES = /^\p{Lu}[\p{L}'’.-]*(?:\s+\p{Lu}[\p{L}'’.-]*){0,2}$/u;
+const NAME_SUFFIX = /^(?:jr|sr|[ivx]+|ph\.?\s?d|m\.?\s?[ad]|esq|sir|dr|rev|mrs?|ms|lord|lady)\.?$/i;
+
+/**
+ * Display form of one author name from catalogue metadata. Strips life-date / floruit qualifiers
+ * ("active 6th century B.C.", "fl. 1200", "1832-1898", "(1832–1898)", "b. 1564", "d. 1616") and other
+ * parentheticals ("Wells, H. G. (Herbert George)"), and turns
+ * "Surname, Forename" into "Forename Surname" when that reading is unambiguous (one surname, up to
+ * three forenames, nothing else). "Sunzi, active 6th century B.C." → "Sunzi";
+ * "active 6th century B.C. Sunzi" → "Sunzi"; "Carroll, Lewis, 1832-1898" → "Lewis Carroll".
+ */
+export function cleanAuthorName(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  let v = value.replace(/\u0000/g, "").replace(/\s+/g, " ").trim();
+  v = v.replace(/\s*\([^()]*\)/g, " ").replace(/\s+/g, " ").trim();   // "(1832–1898)", "(Herbert George)"
+  v = v.replace(LEADING_QUALIFIER, "").replace(LEADING_DATES, "").replace(TRAILING_QUALIFIER, "").trim();
+  const parts = v.split(/\s*,\s*/).filter(Boolean);
+  const kept = parts.filter((p, i) => i === 0 || !QUALIFIER_SEGMENT.test(p));
+  if (kept.length === 2 && SURNAME.test(kept[0]) && FORENAMES.test(kept[1]) && !NAME_SUFFIX.test(kept[1])) {
+    return `${kept[1]} ${kept[0]}`;
+  }
+  return kept.join(", ") || undefined;
 }

@@ -112,7 +112,8 @@ List indexed content (hidden entries excluded). Query: `status?`, `limit?` (defa
 
 For uploaded text (`content_type: "raw_text"`), `source` is truncated to 300 characters.
 `author` is the detected book author (EPUB `dc:creator`, PDF info `Author`, Project Gutenberg
-`Author:` header) or `null`.
+`Author:` header) or `null`, without life dates or "active …" qualifiers ("Carroll, Lewis,
+1832-1898" → "Lewis Carroll"; Gutenberg's "active 6th century B.C. Sunzi" → "Sunzi").
 
 ---
 

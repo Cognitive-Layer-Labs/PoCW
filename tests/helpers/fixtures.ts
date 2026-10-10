@@ -68,8 +68,8 @@ export function makeZip(files: ZipFile[]): Buffer {
 
 export interface EpubOptions {
   title?: string;
-  /** dc:creator entries; role "aut" / "edt" set via opf:role. */
-  creators?: Array<{ name: string; role?: string }>;
+  /** dc:creator entries; role "aut" / "edt" set via opf:role; fileAs → an EPUB 3 file-as refinement. */
+  creators?: Array<{ name: string; role?: string; fileAs?: string }>;
   /** Chapters in SPINE order (manifest lists them reversed to prove spine order is used). */
   chapters?: Array<{ id: string; body: string }>;
   /** Extra files (e.g. Gutenberg license page) appended to the spine. */
@@ -99,7 +99,8 @@ export function makeEpub(opts: EpubOptions = {}): Buffer {
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
     <dc:identifier id="uid">urn:uuid:1234</dc:identifier>
     <dc:title>${title}</dc:title>
-    ${creators.map((c, i) => `<dc:creator id="cr${i}"${c.role ? ` opf:role="${c.role}"` : ""}>${c.name}</dc:creator>`).join("\n    ")}
+    ${creators.map((c, i) => `<dc:creator id="cr${i}"${c.role ? ` opf:role="${c.role}"` : ""}>${c.name}</dc:creator>` +
+      (c.fileAs ? `\n    <meta property="file-as" refines="#cr${i}">${c.fileAs}</meta>` : "")).join("\n    ")}
     <dc:language>en</dc:language>
   </metadata>
   <manifest>

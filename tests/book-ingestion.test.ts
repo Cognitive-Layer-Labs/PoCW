@@ -5,6 +5,7 @@ import { listZipEntries, readZipEntry, newZipBudget, ZipError } from "../src/ser
 import { isEpub, parseEpub, xhtmlToText } from "../src/services/epub";
 import {
   stripGutenberg, parseGutenbergHeader, prepareText, meaningfulMeta, normalizeParagraphs, MAX_TEXT_CHARS,
+  cleanAuthorName,
 } from "../src/services/book-text";
 import { parseUpload, parseSource, UploadParseError } from "../src/services/parser";
 
@@ -78,6 +79,22 @@ describe("Book ingestion", function () {
       expect(doc.text).to.not.contain("FOOTNOTES_ONLY");
     });
 
+    it("Gutenberg's reordered creator (\"active 6th century B.C. Sunzi\") is rebuilt from file-as → \"Sunzi\"", () => {
+      const doc = parseEpub(makeEpub({
+        creators: [
+          { name: "active 6th century B.C. Sunzi", role: "aut", fileAs: "Sunzi, active 6th century B.C." },
+          { name: "Lionel Giles", role: "trl", fileAs: "Giles, Lionel" },
+        ],
+      }));
+      expect(doc.author).to.equal("Sunzi");
+      // Without file-as the leading qualifier is still stripped.
+      expect(parseEpub(makeEpub({ creators: [{ name: "active 6th century B.C. Sunzi", role: "aut" }] })).author).to.equal("Sunzi");
+      // A pen name that differs from file-as stays the display name.
+      expect(parseEpub(makeEpub({ creators: [{ name: "Lewis Carroll", role: "aut", fileAs: "Dodgson, Charles Lutwidge" }] })).author)
+        .to.equal("Lewis Carroll");
+      expect(parseEpub(makeEpub({ creators: [{ name: "Carroll, Lewis, 1832-1898", role: "aut" }] })).author).to.equal("Lewis Carroll");
+    });
+
     it("detects EPUBs by their mimetype entry", () => {
       expect(isEpub(makeEpub())).to.equal(true);
       expect(isEpub(makeEpub({ noMimetype: true }))).to.equal(false);
@@ -126,6 +143,32 @@ describe("Book ingestion", function () {
   });
 
   describe("metadata", () => {
+    it("cleanAuthorName strips life dates / floruit qualifiers and turns \"Surname, Forename\" round when unambiguous", () => {
+      const cases: Array<[string, string]> = [
+        ["Sunzi, active 6th century B.C.", "Sunzi"],
+        ["active 6th century B.C. Sunzi", "Sunzi"],
+        ["Carroll, Lewis, 1832-1898", "Lewis Carroll"],
+        ["Carroll, Lewis (1832–1898)", "Lewis Carroll"],
+        ["Lewis Carroll", "Lewis Carroll"],
+        ["Lewis Carroll (1832-1898)", "Lewis Carroll"],
+        ["Shakespeare, William, b. 1564", "William Shakespeare"],
+        ["Shakespeare, William, d. 1616", "William Shakespeare"],
+        ["Shakespeare, William, 1564?-1616", "William Shakespeare"],
+        ["fl. 1200 Marie de France", "Marie de France"],
+        ["Marie, de France, fl. 12th century", "Marie, de France"],
+        ["Le Guin, Ursula K.", "Ursula K. Le Guin"],
+        ["Wells, H. G. (Herbert George), 1866-1946", "H. G. Wells"],
+        // ambiguous → left alone
+        ["Lewis Carroll, John Tenniel", "Lewis Carroll, John Tenniel"],
+        ["Smith, John, Jr.", "Smith, John, Jr."],
+        ["Homer", "Homer"],
+      ];
+      for (const [raw, clean] of cases) expect(cleanAuthorName(raw), raw).to.equal(clean);
+      expect(cleanAuthorName(42)).to.equal(undefined);
+      expect(parseGutenbergHeader("Title: The Art of War\n\nAuthor: active 6th century B.C. Sunzi\n\nTranslator: Lionel Giles\n").author)
+        .to.equal("Sunzi");
+    });
+
     it("keeps meaningful titles/authors and drops placeholders", () => {
       expect(meaningfulMeta("  Moby  Dick ", "title")).to.equal("Moby Dick");
       for (const junk of ["Untitled", "Microsoft Word - draft.docx", "book1.pdf", "", "  ", "123", "Document1"]) {

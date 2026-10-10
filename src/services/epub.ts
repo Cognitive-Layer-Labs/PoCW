@@ -14,7 +14,7 @@
 import { JSDOM } from "jsdom";
 import * as path from "path";
 import { listZipEntries, readZipEntry, newZipBudget, looksLikeZip, ZipEntry, ZipBudget } from "./zip-reader";
-import { DocumentMeta, meaningfulMeta } from "./book-text";
+import { DocumentMeta, meaningfulMeta, cleanAuthorName } from "./book-text";
 
 export const EPUB_MIME = "application/epub+zip";
 
@@ -75,19 +75,44 @@ function elements(doc: Document | Element, ns: string, local: string): Element[]
   return byNs.length > 0 ? byNs : Array.from(doc.getElementsByTagName(local));
 }
 
+/** Words of a name, lower-case, sorted (to tell whether one name is a reordering of another). */
+const nameWords = (s: string): string =>
+  s.toLowerCase().split(/[^\p{L}\p{N}.]+/u).filter(Boolean).sort().join(" ");
+
+/**
+ * Display name for one creator. Project Gutenberg builds dc:creator by moving everything after the
+ * first comma of the catalogue name (file-as) to the front, so "Sunzi, active 6th century B.C."
+ * became "active 6th century B.C. Sunzi". When the display name is only such a reordering of
+ * file-as, the name is derived from file-as instead (qualifiers stripped, "Surname, Forename"
+ * turned round); otherwise (e.g. a pen name) the display name is kept, cleaned the same way.
+ */
+function creatorDisplayName(display: string, fileAs: string | null): string | undefined {
+  if (fileAs && (!display || nameWords(display) === nameWords(fileAs))) return cleanAuthorName(fileAs);
+  return cleanAuthorName(display);
+}
+
 function creatorNames(opf: Document): string[] {
   const creators = elements(opf, DC_NS, "creator");
   const metas = Array.from(opf.getElementsByTagName("meta"));
+  const refinement = (el: Element, property: string): string | null => {
+    const id = el.getAttribute("id");
+    if (!id) return null;
+    const refine = metas.find(m => m.getAttribute("refines") === `#${id}` && m.getAttribute("property") === property);
+    return refine?.textContent?.replace(/\s+/g, " ").trim() || null;
+  };
   const roleOf = (el: Element): string | null => {
     const legacy = el.getAttributeNS(OPF_NS, "role") || el.getAttribute("opf:role");
     if (legacy) return legacy.trim().toLowerCase();
-    const id = el.getAttribute("id");
-    if (!id) return null;
-    const refine = metas.find(m => m.getAttribute("refines") === `#${id}` && m.getAttribute("property") === "role");
-    return refine?.textContent?.trim().toLowerCase() || null;
+    return refinement(el, "role")?.toLowerCase() || null;
   };
+  const fileAsOf = (el: Element): string | null =>
+    (el.getAttributeNS(OPF_NS, "file-as") || el.getAttribute("opf:file-as") || "").replace(/\s+/g, " ").trim()
+    || refinement(el, "file-as");
   const named = creators
-    .map(el => ({ name: (el.textContent ?? "").replace(/\s+/g, " ").trim(), role: roleOf(el) }))
+    .map(el => ({
+      name: creatorDisplayName((el.textContent ?? "").replace(/\s+/g, " ").trim(), fileAsOf(el)) ?? "",
+      role: roleOf(el),
+    }))
     .filter(c => c.name);
   const authors = named.filter(c => c.role === "aut");
   const chosen = authors.length > 0 ? authors : named.filter(c => c.role === null || c.role === "aut");

@@ -16,7 +16,8 @@ source (http(s) URL / uploaded PDF, EPUB, TXT, MD ≤ 40 MB)
   │      no DOM per chapter); ZIP reader capped at 10 000 entries / 60 MB inflated
   │    ↳ HTML > 1 MB (book-sized pages) uses the same tag stripper instead of jsdom
   │    ↳ Project Gutenberg header/footer stripped; title/author from EPUB OPF, PDF info or the
-  │      Gutenberg header; text cut to 4 000 000 characters
+  │      Gutenberg header (author: life dates / "active …" qualifiers stripped, "Surname,
+  │      Forename" turned round when unambiguous); text cut to 4 000 000 characters
   │
   ▼  Chunker (4000 characters, 500-character overlap)
   │

@@ -12,6 +12,7 @@ import {
   collapseWhitespace,
   truncateText,
   meaningfulMeta,
+  cleanAuthorName,
 } from "./book-text";
 
 /**
@@ -194,7 +195,7 @@ async function parsePdfBuffer(body: Buffer): Promise<PreparedText> {
   }
   const meta: DocumentMeta = {
     title: meaningfulMeta(pdf.info?.Title, "title"),
-    author: meaningfulMeta(pdf.info?.Author, "author"),
+    author: meaningfulMeta(cleanAuthorName(pdf.info?.Author), "author"),
   };
   return prepareText(collapseWhitespace(pdf.text), meta);
 }
