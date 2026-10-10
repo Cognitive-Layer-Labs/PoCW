@@ -1,20 +1,22 @@
 # PoCW — Internals Reference
 
-How the system works under the hood: IRT model, parameter sources, Bloom weights, concept mastery loop, question selection, grading, and stopping conditions.
+How the engine works under the hood: indexing, IRT model, parameter sources, concept mastery loop, question selection, grading, stopping conditions and the result.
 
 ---
 
 ## 1. Indexing Pipeline
 
 ```
-source (URL / PDF / text)
+source (http(s) URL / uploaded PDF / uploaded text)
   │
-  ▼  Parser (html-to-text, pdf-parse, youtube transcript)
+  ▼  Parser (jsdom main-content extraction, pdf-parse, YouTube transcript)
+  │    ↳ URL fetches go through safeFetch: SSRF-guarded (private/internal targets,
+  │      incl. Docker service names and redirects to them, are refused), 50 MB / 30 s caps
   │
-  ▼  Chunker (~1000 tokens, 200-token overlap)
+  ▼  Chunker (4000 characters, 500-character overlap)
   │
-  ▼  LLM (KG extraction prompt) — for each chunk
-  │    ↳ nodes: { id, label, bloomLevel, importance (1–10), description }
+  ▼  LLM (KG extraction prompt) — for up to 15 evenly sampled chunks
+  │    ↳ nodes: { id, label, bloomLevel, importance (1–10) }
   │    ↳ edges: { source, target, relationship }
   │
   ▼  Importance normalization
@@ -31,7 +33,7 @@ LLMs tend to cluster importance scores at 8–10 for most nodes. Rank-based scor
 
 ## 2. Concept Mastery Loop
 
-At session start, the oracle loads all nodes with `importance ≥ 0.65` as **important concepts** (minimum 3, regardless of threshold). Each concept starts as `untested`.
+At session start, the engine loads all nodes with `importance ≥ 0.65` as **important concepts** (minimum 3, regardless of threshold). Each concept starts as `untested`.
 
 ```
 untested → asked → mastered   (correct answer)
@@ -69,7 +71,7 @@ P(correct | θ) = c + (d − c) / (1 + exp(−a · (θ − b)))
 | `b` | Item difficulty | [−2, 2] | KAQG LLM's per-question difficulty rating |
 | `a` | Discrimination | [0.5, 2.5] | Target concept's contextual importance (KG) |
 | `c` | Lower asymptote (guessing) | 0–0.5 | Type-based rule (see below) |
-| `d` | Upper asymptote | constant | Fixed `0.95` |
+| `d` | Upper asymptote | constant | Fixed `1.0` |
 
 **Type-based `c` (guessing probability):**
 
@@ -85,7 +87,8 @@ P(correct | θ) = c + (d − c) / (1 + exp(−a · (θ − b)))
 - `a = clamp(0.5, 2.5, 0.5 + 2.0 × importance)`, where `importance` ∈ [0, 1] is the target
   concept's contextual importance in the Knowledge Graph (more central concept ⇒ more discriminating).
 - `c` is the type-based guessing floor (table above).
-- `d = 0.95` (constant upper asymptote; models ~5% slip even at high ability).
+- `d = 1.0` (constant upper asymptote, so P(correct) → 1 at high ability and the
+  `(θ + 2) / 4 × 100` score projection stays self-consistent).
 
 > **Note.** Earlier versions blended in a Python/XGBoost "IRT predictor" sidecar for `a`/`b`/`d`.
 > That was removed: text-only semantic difficulty prediction proved too weak to add signal (see the
@@ -95,58 +98,45 @@ P(correct | θ) = c + (d − c) / (1 + exp(−a · (θ − b)))
 
 ## 4. IRT Ability Update (MAP Newton-Raphson)
 
-After each answer, θ is updated using **Maximum A Posteriori** estimation with a Bloom-weighted likelihood:
+After each answer, θ is re-estimated over **all** responses so far with standard
+(unweighted) 4PL **Maximum A Posteriori** estimation:
 
 ```
-Prior:      θ ~ N(0, 1)
-Likelihood: weighted by bloomWeight for this question
+Prior:  θ ~ N(0, 1)
 
-Update step (Newton-Raphson):
-  P   = 4PL probability at current θ
-  Q   = 1 − P
-  W   = P × Q                             (Fisher information weight)
-  W_b = W × bloomWeight                   (Bloom-weighted)
+For each response i (u_i ∈ {0, 1}):
+  P_i   = 4PL probability at current θ
+  P'_i  = a_i (P_i − c_i)(d_i − P_i) / (d_i − c_i)
 
-  ΔL = W_b × (response − P) / (P × Q)   (weighted score residual)
-  ΔΔ = W_b × W / (P × Q)                (weighted curvature)
+  gradient  = Σ (u_i − P_i) P'_i / (P_i (1 − P_i))  − θ
+  hessian   = − Σ P'_i² / (P_i (1 − P_i))           − 1
 
-  dL  = ΔL × a − θ    (with prior gradient)
-  d2L = ΔΔ × a² + 1   (with prior curvature)
-
-  θ_new = clamp(θ − dL / d2L, −2, 2)
-  SE    = 1 / sqrt(d2L)
+θ ← clamp(θ − gradient / hessian, −2, 2)     (step halved while |Δ| > 1.5, ≤ 50 iterations)
+SE = 1 / sqrt(1 + Σ FisherInfo_i(θ))
 ```
 
-θ is clamped to [−2, 2] after every update.
+All-correct / all-wrong patterns (where MAP is ill-conditioned) use a bounded heuristic:
+θ = max(b) + min(0.5·ln(n+1), 1) (resp. min(b) − …), clamped to [−2, 2].
 
 ---
 
-## 5. Bloom Level Weights
+## 5. Bloom Levels
 
-Bloom's Taxonomy is used as a **quality weight**, not a coverage axis. The protocol does not require testing all six levels — it asks what quality of reasoning the question demands.
-
-| Bloom Level | Weight | Effect on θ update |
-|---|---|---|
-| Remember | 0.10 | Near-zero contribution (recall ≠ understanding) |
-| Understand | 0.25 | Small contribution |
-| Apply | 0.50 | Moderate contribution |
-| Analyze | 0.80 | Strong contribution |
-| Evaluate | 1.30 | Very strong contribution |
-| Create | 2.00 | Maximum contribution |
-
-A correct answer on a `Create`-level question moves θ ~20× more than a correct answer on a `Remember`-level question. This prevents "gaming" the test with easy recall questions.
-
-**Bloom level assignment:**
-The KAQG LLM assigns a Bloom level to each generated question. The IRT engine maps the IRT θ target to a suggested Bloom level, but the LLM's actual assignment is used for weighting (they may differ by ±1 level).
+Bloom's Taxonomy is descriptive: it drives **which** question is generated (the IRT target
+difficulty is mapped to a suggested Bloom level) and is reported in the result profile
+(`bloomCoverage`, `bloomLevelsReached`). It does **not** weight the ability estimate.
 
 ```
-θ target → suggested Bloom:
-  < −1.5 → Remember
-  < −0.5 → Understand
+target difficulty b → suggested Bloom:
+  < −1.0 → Remember
+  <  0.0 → Understand
   <  0.5 → Apply
-  <  1.5 → Analyze
-  ≥  1.5 → Evaluate / Create
+  <  1.0 → Analyze
+  <  1.5 → Evaluate
+  ≥  1.5 → Create
 ```
+
+The question-generation LLM assigns the final Bloom level of each question (it may differ from the suggestion).
 
 ---
 
@@ -206,7 +196,8 @@ score = round(((θ + 2) / 4) × 100)
 
 This maps θ = −2 → score 0, θ = 0 → score 50, θ = +2 → score 100.
 
-The default pass threshold is `threshold = 0.7`, meaning score ≥ 70 (θ ≥ 0.8) passes.
+The default threshold is `threshold = 0.7`: `competenceIndicator` is true when score ≥ 70 (θ ≥ 0.8).
+Difficulty presets override it (easy 0.35, medium 0.50, hard 0.65).
 
 ---
 
@@ -216,26 +207,28 @@ The session ends when **any one** of these is true:
 
 | Condition | Check |
 |---|---|
-| Max questions reached | `questionsAsked ≥ max_questions` |
-| IRT converged | `SE < 0.40` |
+| Max questions reached | `questionsAsked ≥ maxQuestions` |
+| IRT converged | `questionsAsked ≥ 4 AND SE < 0.40`, or `questionsAsked ≥ 15` |
 | Concept mastery complete | All important concepts are `mastered` or `failed_final` AND `SE < 0.40` |
+
+`maxQuestions` (returned by `POST /api/verify`) is `max_questions` raised to the number of important
+concepts, capped at `cap_questions` (preset cap, or `2 × max_questions` without a preset).
 
 ---
 
-## 10. Attestation Payload
+## 10. Result: Per-Concept Outcomes and Profile
 
-The oracle signs the following payload with EIP-191 (`eth_sign`):
+Every result carries:
 
-```
-keccak256(abi.encode(
-  userAddress,
-  contentId,
-  score,
-  nonce,       // bytes32, unique per session, stored on-chain to prevent replay
-  expiry,      // unix timestamp, signature expires after this
-  keccak256(bytes(tokenUri))  // base64-encoded ERC-1155 metadata
-))
-```
+- `concepts[]` — one entry per **important concept** tracked by the mastery loop (label from the KG
+  node), in descending importance: `{ id, label, asked, correct, mastered }`. `asked`/`correct` count
+  the questions tied to that concept; `mastered` is true when the mastery loop marked it mastered.
+  Concepts that were never reached have `asked: 0`.
+- `response_detail[].conceptId` (when `response: "detailed"`) — the KG concept the question targeted.
+  Questions generated in pure-Fisher mode are matched to a tracked concept by label; otherwise `null`.
+- `profile` — `{ title, source, bloomLevelsReached, bloomCoverage, aberrant, questionTypes }`
+  (`aberrant` is a simple person-fit flag: ≥ 4 answers, all correct, mean item difficulty ≥ θ + 0.5).
+- `disclaimers` — interpretation caveats (uncalibrated IRT, heuristic Bloom mapping and threshold).
 
-The SBT (`PoCW_SBT`) stores the `tokenUri` on-chain. It contains a base64-encoded JSON cognitive profile (θ, SE, score, question types, Bloom coverage, oracle address, timestamp). No external storage is used.
-
+The result is computed once when first requested and then frozen for the lifetime of the session
+(30 minutes in Redis), so repeated `GET /api/verify/:sessionId/result` calls return the same body.

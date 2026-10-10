@@ -242,7 +242,7 @@ export const POCW_DISCLAIMERS: PoCWDisclaimers = {
     "Bloom's taxonomy levels are derived from a linear IRT difficulty mapping with " +
     "arbitrary thresholds. They describe approximate cognitive complexity, not certified task types.",
   thresholdSemantics:
-    "The competence indicator threshold is a configurable heuristic (default 0.7 = theta ~1.6). " +
+    "The competence indicator threshold is a configurable heuristic (default 0.7 = theta ~0.8). " +
     "It does not correspond to a validated psychometric standard.",
 };
 

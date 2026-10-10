@@ -1,456 +1,427 @@
-# PoCW — API Reference
+# PoCW Engine — API Reference
 
-## SDK Quick Start
-
-```ts
-import { PoCW } from "./oracle-service/src/sdk/index";
-
-const pocw = new PoCW();
-await pocw.init();
-
-// 1. Index content
-const { knowledgeId } = await pocw.index("https://en.wikipedia.org/wiki/Ethereum");
-await pocw.waitForIndex(knowledgeId);
-
-// 2. Verify knowledge (callback mode)
-const result = await pocw.verify(knowledgeId, "0xUserAddress", {
-  max_questions: 7,
-  q_types: ["open", "mcq", "true_false"],
-  attest: "onchain",
-  chain: { controllerAddress: "0x...", sbtAddress: "0x..." },
-  onQuestion: async (q) => {
-    console.log(q.text);
-    return readlineAnswer();
-  },
-});
-
-console.log(result.score, result.competenceIndicator);
-await pocw.close();
-```
+- [HTTP API](#http-api) — what the landing app (or any server-side client) calls
+- [SDK](#sdk) — using the engine in-process from TypeScript
+- [Types](#types) · [Errors](#errors)
 
 ---
 
-## `pocw.init(config?)`
-
-Initialize the SDK. Must be called before any other method.
-
-```ts
-interface PoCWInitConfig {
-  dataDir?: string;    // SQLite data directory (default: oracle-service/data)
-}
-```
-
----
-
-## `pocw.index(source)`
-
-Index content for later verification. Returns immediately; indexing runs in the background.
-
-**Parameters:**
-
-| Name | Type | Description |
-|---|---|---|
-| `source` | `string` | URL, IPFS CID (`ipfs://...`), or raw text |
-
-**Returns:** `Promise<IndexResult>`
-
-```ts
-interface IndexResult {
-  knowledgeId: string;  // deterministic sha256 of normalized source
-  status: "pending" | "indexing" | "ready" | "failed";
-  contentId?: number;   // numeric ID for FalkorDB graph
-  error?: string;       // only if status = "failed"
-}
-```
-
-**Supported content types:**
-- URLs: HTML pages, PDFs, plain text files
-- IPFS: `ipfs://Qm...` CIDs
-- YouTube: transcript extraction from video URLs
-- Raw text: any string that isn't a URL or CID
-
-**Behavior:**
-- Idempotent — calling with the same source returns the existing entry
-- The KG build step calls an LLM to extract concepts and relationships
-- Status is tracked in SQLite (`data/pocw.db`)
-
----
-
-## `pocw.waitForIndex(knowledgeId, timeoutMs?)`
-
-Poll until indexing completes. Resolves when status becomes `"ready"`.
-
-| Param | Type | Default |
-|---|---|---|
-| `knowledgeId` | `string` | — |
-| `timeoutMs` | `number` | `300000` |
-
-**Throws:** `INDEXING_FAILED` if indexing fails or times out.
-
----
-
-## `pocw.verify(knowledgeId, subject, config?)`
-
-Start a verification session. Two modes:
-
-### Callback mode
-
-Provide `config.onQuestion`. The SDK drives the Q&A loop and returns the final `PoCWResult`.
-
-```ts
-const result = await pocw.verify(knowledgeId, userAddress, {
-  max_questions: 7,
-  onQuestion: async (q) => {
-    // present question, return user's answer string
-    return answer;
-  },
-});
-```
-
-### Session mode
-
-Without `onQuestion`, returns a `VerifySession` for step-by-step control (used by the HTTP server).
-
-```ts
-const session = await pocw.verify(knowledgeId, userAddress, { max_questions: 7 });
-
-while (session.isActive()) {
-  const q = session.currentQuestion;   // VerifyQuestion
-  const feedback = await session.submitAnswer(userAnswer);
-  console.log(feedback.correct, feedback.score);
-}
-
-const result = await session.getResult();
-```
-
----
-
-## Verify Config Reference
-
-```ts
-interface PoCWConfig {
-  max_questions?: number;
-  difficulty?: number;
-  threshold?: number;
-  q_types?: QuestionType[];
-  response?: "boolean" | "score" | "detailed";
-  attest?: "onchain" | "offchain" | "none";
-  chain?: ChainConfig;
-  language?: string;
-  persona?: string;
-  model?: string;
-  onQuestion?: (q: VerifyQuestion) => Promise<string>;
-}
-```
-
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `max_questions` | `number` | `10` | Maximum questions before session ends (1–50) |
-| `difficulty` | `number` | `0.5` | Starting difficulty 0–1. Maps to IRT θ₀: `(val × 4) − 2`. 0 = easiest (θ=−2), 1 = hardest (θ=2). |
-| `threshold` | `number` | `0.7` | Pass/fail cutoff 0–1. Score ≥ `threshold × 100` passes. |
-| `q_types` | `QuestionType[]` | `["open","mcq","true_false"]` | Question types. Use a single type to lock it; all three = difficulty-driven mixed mode. |
-| `response` | `string` | `"score"` | `"boolean"`: pass/fail only. `"score"`: + numeric score. `"detailed"`: + per-question breakdown. |
-| `attest` | `string` | `"none"` | `"none"` / `"offchain"` / `"onchain"`. Onchain includes oracle signature for `verifyAndMint`. |
-| `chain` | `ChainConfig` | — | Required when `attest = "onchain"`. |
-| `language` | `string` | auto | Language for generated questions. Omit to match content language. |
-| `persona` | `string` | — | Question framing, e.g. `"university professor"`, `"explain to a 5-year-old"`. |
-| `model` | `string` | from ai-config.yml | OpenRouter model ID override for all LLM calls in this session. |
-| `onQuestion` | `function` | — | Callback mode hook. Receives `VerifyQuestion`, must return the user's answer string. |
-
-```ts
-interface ChainConfig {
-  controllerAddress: string;  // deployed PoCW_Controller address
-  sbtAddress: string;         // deployed PoCW_SBT address
-}
-```
-
----
-
-## VerifyQuestion
-
-```ts
-interface VerifyQuestion {
-  text: string;           // question text (or T/F statement)
-  number: number;         // 1-indexed position in session
-  type: QuestionType;     // "open" | "mcq" | "true_false"
-  bloomLevel: string;     // Bloom's level: Remember → Create
-  difficulty: number;     // IRT b parameter used to generate this question
-  totalQuestions: number; // max_questions for this session
-  options?: string[];     // MCQ only: exactly 4 options, no letter prefix
-}
-```
-
-**Question types:**
-
-| Type | Answer format | Graded by |
-|---|---|---|
-| `"open"` | Free text | LLM (claim-based) |
-| `"mcq"` | `"A"`, `"B"`, `"C"`, or `"D"` | Exact match (no LLM call) |
-| `"true_false"` | `"true"` or `"false"` (also: `"t"`, `"f"`, `"yes"`, `"no"`) | Exact match (no LLM call) |
-
----
-
-## AnswerFeedback
-
-Returned by `session.submitAnswer()`.
-
-```ts
-interface AnswerFeedback {
-  correct: boolean;
-  score: number;           // 0–100
-  reasoning: string;       // explanation of correctness
-  dimensions?: {           // open questions only
-    covered_points: number;  // key points correctly covered
-    total_points: number;    // total key points
-    precision_cap: number;   // 100 | 60 | 40 (conceptual precision gate)
-  };
-  progress: {
-    questionNumber: number;
-    theta: number;          // current IRT ability estimate θ ∈ [−2, 2]
-    se: number;             // standard error of estimate
-    bloomLevel: string;
-  };
-  isComplete: boolean;
-}
-```
-
----
-
-## PoCWResult
-
-Final result returned after session completes.
-
-```ts
-interface PoCWResult {
-  competenceIndicator: boolean;          // score >= threshold * 100
-  score: number;                         // 0–100, mapped from θ
-  theta: number;                         // IRT ability estimate ∈ [−2, 2]
-  se: number;                            // standard error
-  converged: boolean;                    // SE < 0.40
-  confidence_interval: [number, number]; // [low, high] scores from θ ± 1.96·SE
-  questions_asked: number;
-  response_detail?: ScoreBreakdown[];    // only if response = "detailed"
-  attestation?: AttestationResult;       // only if attest != "none"
-  knowledgeId: string;
-  contentId: number;
-  subject: string;
-  timestamp: string;                     // ISO 8601
-  tokenUri?: string;                     // base64 ERC-1155 metadata URI
-}
-
-interface ScoreBreakdown {
-  question: string;
-  type: QuestionType;
-  score: number;
-  difficulty: number;
-  bloomLevel: string;
-  correct: boolean;
-}
-```
-
----
-
-## Attestation
-
-### Off-chain (`attest: "offchain"`)
-
-```ts
-interface OffchainAttestation {
-  type: "offchain";
-  signature: string;   // oracle's EIP-191 signature
-  contentId: number;
-  score: number;
-  nonce: string;       // bytes32 replay protection
-  expiry: number;      // unix timestamp
-  tokenUri: string;    // base64 ERC-1155 metadata
-  oracle: string;      // oracle Ethereum address
-}
-```
-
-### On-chain (`attest: "onchain"`)
-
-Same as offchain plus contract addresses. Use the returned fields to call `verifyAndMint`:
-
-```ts
-interface OnchainAttestation extends OffchainAttestation {
-  type: "onchain";
-  controllerAddress: string;
-  sbtAddress: string;
-}
-```
-
-**Minting the SBT:**
-
-```ts
-const att = result.attestation as OnchainAttestation;
-
-await controller.verifyAndMint(
-  userAddress,
-  att.contentId,
-  result.score,
-  att.expiry,
-  att.nonce,
-  result.tokenUri ?? "",
-  att.signature
-);
-```
-
-The `PoCW_Controller` verifies the oracle signature on-chain, marks the nonce as used, sets the token URI, and mints the SBT. The SDK never sends the transaction — that is always the caller's responsibility.
-
----
-
-## REST API
-
-The Oracle service exposes an Express HTTP API. Authenticate with `Authorization: Bearer <POCW_API_KEY>`.
-
-### `POST /api/index`
-
-Start indexing content.
-
-**Request:**
-```json
-{ "source": "https://example.com/article" }
-```
-
-**Response 202:**
-```json
-{ "knowledgeId": "abc...", "status": "indexing", "contentId": 42 }
-```
+## HTTP API
+
+### Conventions
+
+- **Auth.** Every `/api/*` route requires `Authorization: Bearer <POCW_API_KEY>` when the key is
+  configured (always in production). `/api/admin/*` requires `Authorization: Bearer <ADMIN_API_KEY>`
+  instead; when `ADMIN_API_KEY` is unset the admin API answers `403`. Keys are compared in constant time.
+- **Errors** are JSON: `{ "error": "<message>", "code": "<CODE>" }` (see [Errors](#errors)).
+- **Rate limit.** 30 requests/min per client IP (`429`, code `CAPACITY_EXCEEDED`, standard
+  `RateLimit-*` headers). `GET /api/index/:knowledgeId` (status polling) is exempt from that budget
+  and has its own limit of 120/min. `/health` is not limited. Behind a proxy, set `TRUST_PROXY` so the
+  client IP is taken from `X-Forwarded-For`.
+- **Body size.** JSON bodies ≤ 1 MB; uploads ≤ 10 MB (`413` otherwise).
+
+### Index status values
+
+`status` is one of **`"pending"`**, **`"indexing"`**, **`"ready"`**, **`"failed"`**.
+
+Indexing endpoints answer **`202` + `Retry-After: 5`** while the status is `pending` or `indexing`,
+and **`200`** once it is terminal (`ready`, or `failed` with an `error` message). Re-submitting a
+source whose indexing `failed` retries it.
 
 ---
 
 ### `POST /api/upload`
 
-Upload a file (PDF or text) and index it.
+Index an uploaded file. Raw request body (not multipart).
 
-**Request:** `multipart/form-data` with a `file` field.
+| `Content-Type` | Handling |
+|---|---|
+| `application/pdf` | text extracted with pdf-parse (`422` if the PDF has no text layer) |
+| `text/*` | decoded as UTF-8 |
+| `application/octet-stream` | PDF if the body starts with `%PDF-`, otherwise UTF-8 text (`415` if binary) |
 
-**Response 202:** Same as `/api/index`.
+The body is always indexed as **text** — it is never interpreted as a URL or path. The same text
+always maps to the same `knowledgeId`.
+
+**Response** `200` (already indexed) or `202` + `Retry-After` (indexing started):
+
+```json
+{ "knowledgeId": "3f5a…", "status": "indexing", "contentId": 182736451234 }
+```
+
+Other responses: `400` empty body, `415` unsupported content type / binary file, `413` > 10 MB.
 
 ---
 
-### `GET /api/index/:knowledgeId`
+### `POST /api/index`
 
-Check indexing status.
+Index a web page, PDF/text file URL, or YouTube video (captions).
 
-**Response 200:**
 ```json
-{ "knowledgeId": "abc...", "status": "ready", "contentId": 42 }
+{ "source": "https://en.wikipedia.org/wiki/Photosynthesis" }
 ```
+
+`source` must be an `http://` or `https://` URL (`400` otherwise). URLs that are, resolve to, or
+redirect to private/internal addresses (loopback, RFC 1918, link-local/metadata, CGNAT, Docker service
+names, …) fail indexing with an `SSRF blocked` error.
+
+**Response:** same shape and status codes as `/api/upload`.
 
 ---
 
 ### `GET /api/index`
 
-List all indexed content.
+List indexed content (hidden entries excluded). Query: `status?`, `limit?` (default 50, max 200), `offset?`.
 
-**Query params:** `?status=ready&limit=20&offset=0`
-
-**Response 200:**
 ```json
-{ "rows": [...], "total": 5 }
+{
+  "rows": [
+    {
+      "knowledge_id": "3f5a…", "content_type": "url", "source": "https://…",
+      "title": "Photosynthesis", "description": "Photosynthesis is…",
+      "status": "ready", "error": null, "content_id": 182736451234,
+      "content_hash": "…", "chunk_count": 12, "created_at": "2026-10-10 10:00:00",
+      "indexed_at": "2026-10-10 10:01:10", "usage_count": 3, "last_used_at": "…", "hidden": 0
+    }
+  ],
+  "total": 1
+}
 ```
+
+For uploaded text (`content_type: "raw_text"`), `source` is truncated to 300 characters.
+
+---
+
+### `GET /api/index/:knowledgeId`
+
+Indexing status. `202` + `Retry-After: 5` while `pending`/`indexing`, `200` when `ready`/`failed`,
+`404` (`CONTENT_NOT_FOUND`) for unknown ids. Poll every ~5 s.
+
+```json
+{
+  "knowledgeId": "3f5a…",
+  "status": "ready",
+  "contentId": 182736451234,
+  "title": "Photosynthesis",
+  "source": "https://en.wikipedia.org/wiki/Photosynthesis"
+}
+```
+
+`error` is present when `status` is `"failed"`. `source` is only returned for URL sources.
+
+---
+
+### `PATCH /api/index/:knowledgeId/title`
+
+Body `{ "title": "Custom title" }` stores a title; with no body the title is re-derived from a URL
+source (YouTube oEmbed or LLM). Response: `{ "knowledgeId": "…", "title": "…" }`.
 
 ---
 
 ### `POST /api/verify`
 
-Start a verification session.
+Start an adaptive test session.
 
-**Request:**
 ```json
 {
-  "knowledgeId": "abc...",
-  "subject": "0xUserAddress",
-  "config": {
-    "max_questions": 7,
-    "q_types": ["open", "mcq", "true_false"],
-    "attest": "onchain",
-    "chain": { "controllerAddress": "0x...", "sbtAddress": "0x..." }
-  }
+  "knowledgeId": "3f5a…",
+  "subject": "learner-42",
+  "config": { "difficulty_preset": "medium", "q_types": ["open", "mcq", "true_false"], "response": "detailed" }
 }
 ```
+
+- `knowledgeId` — required; content must be `ready` (`202` `INDEXING_IN_PROGRESS` while indexing,
+  `422` `INDEXING_FAILED`, `404` `CONTENT_NOT_FOUND`).
+- `subject` — optional free-form learner label (≤ 200 chars), echoed in the result. Default `"anonymous"`.
+- `config` — optional [`PoCWConfig`](#pocwconfig).
 
 **Response 200:**
+
 ```json
 {
-  "sessionId": "uuid",
+  "sessionId": "0b6c2f7e-…",
   "question": {
-    "text": "...",
+    "text": "Which molecule is split during the light-dependent reactions?",
     "number": 1,
     "type": "mcq",
-    "bloomLevel": "Apply",
-    "difficulty": 0.42,
-    "totalQuestions": 7,
-    "options": ["Option A", "Option B", "Option C", "Option D"]
-  }
+    "bloomLevel": "Understand",
+    "difficulty": -0.4,
+    "totalQuestions": 15,
+    "options": ["Glucose", "Water", "Carbon dioxide", "ATP"]
+  },
+  "importantConceptCount": 9,
+  "maxQuestions": 15
 }
 ```
+
+`question.options` is present for `mcq` only. Answer MCQs with the option letter (`"B"`) or text
+prefix; true/false with `true`/`false` (`t`, `f`, `yes`, `no` accepted). Sessions live 30 minutes
+in Redis, refreshed on every answer.
 
 ---
 
 ### `POST /api/verify/:sessionId/answer`
 
-Submit an answer.
+```json
+{ "answer": "B" }
+```
 
-**Request:** `{ "answer": "B" }`
+`answer`: 1–50 000 characters.
 
-**Response 200:**
+**Response 200** ([`AnswerFeedback`](#answerfeedback), plus `nextQuestion` while the session continues):
+
 ```json
 {
   "correct": true,
   "score": 100,
-  "reasoning": "Correct. Option B describes...",
-  "progress": { "questionNumber": 1, "theta": 0.3, "se": 0.95, "bloomLevel": "Apply" },
+  "reasoning": "Correct answer selected.",
+  "irtParams": { "a": 2.1, "b": -0.4, "c": 0.25, "d": 1, "importance": 0.8, "theta_before": 0 },
+  "correctAnswer": "B",
+  "progress": { "questionNumber": 1, "theta": 0.62, "se": 0.91, "bloomLevel": "Apply" },
   "isComplete": false,
-  "nextQuestion": { ... }
+  "nextQuestion": { "text": "…", "number": 2, "type": "open", "bloomLevel": "Apply", "difficulty": 0.6, "totalQuestions": 15 }
 }
 ```
 
-When `isComplete` is `true`, `nextQuestion` is absent. Call `/result` to retrieve the final result.
+Open questions return `dimensions: { covered_points, total_points, precision_cap }` and
+`referenceKeyPoints: string[]` instead of `correctAnswer`. When `isComplete` is `true`,
+`nextQuestion` is absent — fetch the result.
+
+Errors: `404` `SESSION_EXPIRED` (unknown/expired session), `409` `SESSION_NOT_ACTIVE` (already
+complete), `503` `LLM_ERROR` (generation/grading failed — retry the same answer).
 
 ---
 
 ### `GET /api/verify/:sessionId/result`
 
-Get the final result. Only available after `isComplete = true`.
+Final result of a completed session (`409` `SESSION_NOT_ACTIVE` before that). The result is computed
+once and frozen: repeated calls within the session lifetime return the same body.
 
-**Response 200:** Full `PoCWResult` object.
+```json
+{
+  "competenceIndicator": true,
+  "score": 74,
+  "theta": 0.96,
+  "se": 0.38,
+  "converged": true,
+  "confidence_interval": [55, 93],
+  "questions_asked": 11,
+  "response_detail": [
+    {
+      "question": "Which molecule is split…", "type": "mcq", "score": 100,
+      "difficulty": -0.4, "bloomLevel": "Understand", "correct": true,
+      "conceptId": "light_dependent_reactions"
+    }
+  ],
+  "concepts": [
+    { "id": "light_dependent_reactions", "label": "Light-dependent reactions", "asked": 2, "correct": 1, "mastered": true },
+    { "id": "calvin_cycle", "label": "Calvin cycle", "asked": 0, "correct": 0, "mastered": false }
+  ],
+  "profile": {
+    "title": "Photosynthesis",
+    "source": "https://en.wikipedia.org/wiki/Photosynthesis",
+    "bloomLevelsReached": ["Understand", "Apply"],
+    "bloomCoverage": { "Understand": 4, "Apply": 5, "Analyze": 2 },
+    "aberrant": false,
+    "questionTypes": ["mcq", "open", "true_false"]
+  },
+  "knowledgeId": "3f5a…",
+  "contentId": 182736451234,
+  "subject": "learner-42",
+  "timestamp": "2026-10-10T10:12:00.000Z",
+  "disclaimers": { "irtCalibration": "…", "bloomMapping": "…", "thresholdSemantics": "…" }
+}
+```
+
+- `concepts` — **always present** (possibly empty): one entry per important KG concept tracked by the
+  session, in descending importance, label from the KG node. `asked`/`correct` count questions tied to
+  the concept; `mastered` reflects the concept-mastery loop.
+- `response_detail` — only when `config.response = "detailed"`. Each entry's `conceptId` is the KG
+  concept id the question targeted, or `null` if it could not be tied to a tracked concept.
+- `score` = `round((clamp(θ, −2, 2) + 2) / 4 × 100)`; `competenceIndicator` = `score ≥ threshold × 100`.
+
+---
+
+### `GET /api/graph/:knowledgeId`
+
+Knowledge graph of indexed content (also accepts the numeric `contentId`). `503` `GRAPH_DB_ERROR`
+when FalkorDB is unavailable.
+
+```json
+{
+  "contentId": 182736451234,
+  "nodes": [{ "id": "calvin_cycle", "label": "Calvin cycle", "bloomLevel": "Understand", "importance": 0.71 }],
+  "edges": [{ "source": "light_dependent_reactions", "target": "calvin_cycle", "relationship": "supplies_atp_to" }]
+}
+```
+
+`importance` is normalised to [0, 1].
+
+---
+
+### Admin — `Authorization: Bearer <ADMIN_API_KEY>`
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| `GET` | `/api/admin/content` | — (query `status?`, `limit?` ≤ 500, `offset?`) | `{ rows, total }` including hidden entries |
+| `PATCH` | `/api/admin/content/:knowledgeId/visibility` | `{ "hidden": true }` | `{ knowledgeId, hidden }` |
+| `DELETE` | `/api/admin/content/:knowledgeId` | — | `{ deleted: true, knowledgeId, contentId, nodesDeleted }` |
+| `POST` | `/api/admin/content/:knowledgeId/reindex` | — | `202` + `Retry-After`, `{ knowledgeId, status: "indexing", contentId }` |
+| `POST` | `/api/admin/wipe` | — | `{ wiped: true, contentRemoved, nodesRemoved }` |
+
+`403` `FORBIDDEN` when the admin API is disabled, `401` `UNAUTHORIZED` on a wrong key.
 
 ---
 
 ### `GET /health`
 
-Liveness check.
-
-**Response 200:** `{ "status": "ok", "uptime": 42.3 }`
+No auth, not rate-limited. `200 { "status": "ok", "falkordb": true }` (`falkordb: false` while
+running degraded).
 
 ---
 
-## Error Reference
-
-All SDK errors are `PoCWError` with a typed `code`. HTTP endpoints map them to status codes.
-
-| Code | HTTP | Description |
-|---|---|---|
-| `CONTENT_NOT_FOUND` | 404 | Knowledge ID doesn't exist |
-| `INDEXING_IN_PROGRESS` | 202 | Content still being indexed |
-| `INDEXING_FAILED` | 422 | Indexing failed (check `error` field) |
-| `INVALID_CONFIG` | 400 | Bad configuration parameter |
-| `SESSION_EXPIRED` | 410 | Session timed out |
-| `SESSION_NOT_ACTIVE` | 409 | No current question or session already complete |
-| `LLM_ERROR` | 503 | LLM API call failed (circuit breaker open) |
-| `GRAPH_DB_ERROR` | 503 | FalkorDB operation failed |
-| `ATTESTATION_ERROR` | 500 | Oracle signing failed |
-| `CAPACITY_EXCEEDED` | 429 | Rate limit exceeded |
+## SDK
 
 ```ts
-try {
-  await pocw.verify("nonexistent-id", "0xUser");
-} catch (err) {
-  if (err instanceof PoCWError) {
-    console.log(err.code);    // "CONTENT_NOT_FOUND"
-    console.log(err.message);
-  }
+import { PoCW } from "./src/sdk";
+
+const pocw = new PoCW({ dbPath: "./data/pocw.db" });
+await pocw.init();                       // FalkorDB + SQLite (env: FALKORDB_*, see README)
+
+const { knowledgeId } = await pocw.index("https://en.wikipedia.org/wiki/Photosynthesis");
+await pocw.waitForIndex(knowledgeId);    // throws INDEXING_FAILED on failure/timeout
+
+// Callback mode: the SDK drives the loop and returns the PoCWResult.
+const result = await pocw.verify(knowledgeId, "learner-42", {
+  difficulty_preset: "medium",
+  onQuestion: async (q) => askUser(q.text, q.options),
+});
+console.log(result.score, result.concepts);
+
+// Session mode: drive it yourself (this is what the HTTP API does).
+const session = await pocw.verify(knowledgeId, "learner-42", { max_questions: 7 });
+while (session.isActive()) {
+  const feedback = await session.submitAnswer(await askUser(session.currentQuestion.text));
+}
+const final = await session.getResult();
+
+await pocw.close();
+```
+
+| Method | Description |
+|---|---|
+| `init()` / `close()` | Open / close FalkorDB + SQLite |
+| `index(source, { asText? })` | URL or raw text → `IndexResult` (background indexing, idempotent). `asText: true` never treats the input as a URL |
+| `getIndexStatus(knowledgeId)` | `IndexResult` |
+| `waitForIndex(knowledgeId, timeoutMs = 300000)` | Resolves when `ready` |
+| `listContent({ status?, limit?, offset?, includeHidden? })` | `{ rows: ContentRow[], total }` |
+| `verify(knowledgeId, subject, config?)` | `VerifySession` (no `onQuestion`) or `PoCWResult` (with `onQuestion`) |
+| `getContentChunks(knowledgeId)` | Cached text chunks (re-parsed after restart) |
+| `setVisibility`, `deleteResource`, `reindexResource`, `wipeAll` | Admin operations |
+
+---
+
+## Types
+
+### `PoCWConfig`
+
+```ts
+interface PoCWConfig {
+  max_questions?: number;            // 1–50, default 10 (raised to #important concepts, capped)
+  difficulty_preset?: "easy" | "medium" | "hard"; // overrides difficulty/threshold/max_questions
+  difficulty?: number;               // 0–1, default 0.5
+  q_types?: ("open" | "mcq" | "true_false")[];   // default all three (type chosen by target difficulty)
+  threshold?: number;                // 0–1, default 0.7 → competenceIndicator when score ≥ 70
+  response?: "boolean" | "score" | "detailed";   // "detailed" adds response_detail
+  model?: string;                    // OpenRouter model override for generation/grading
+  language?: string;                 // question language (default: content language)
+  persona?: string;                  // framing, e.g. "explain to a 12-year-old"
+  onQuestion?: (q: VerifyQuestion) => Promise<string>; // SDK callback mode only
 }
 ```
+
+| Preset | difficulty | threshold | max_questions | cap |
+|---|---|---|---|---|
+| `easy` | 0.20 | 0.35 | 10 | 15 |
+| `medium` | 0.40 | 0.50 | 15 | 25 |
+| `hard` | 0.65 | 0.65 | 20 | 40 |
+
+### `VerifyQuestion`
+
+```ts
+interface VerifyQuestion {
+  text: string;
+  number: number;           // 1-based
+  type: "open" | "mcq" | "true_false";
+  bloomLevel: string;       // Remember … Create
+  difficulty: number;       // IRT b, [−2, 2]
+  totalQuestions: number;   // current maxQuestions
+  options?: string[];       // mcq only (4 items)
+}
+```
+
+### `AnswerFeedback`
+
+```ts
+interface AnswerFeedback {
+  correct: boolean;
+  score: number;                                   // 0–100
+  reasoning: string;
+  dimensions?: { covered_points: number; total_points: number; precision_cap: number }; // open
+  irtParams?: { a: number; b: number; c: number; d: number; importance: number; theta_before: number };
+  referenceKeyPoints?: string[];                   // open
+  correctAnswer?: string;                          // mcq / true_false
+  progress: { questionNumber: number; theta: number; se: number; bloomLevel: string };
+  isComplete: boolean;
+}
+```
+
+### `PoCWResult`
+
+```ts
+interface PoCWResult {
+  competenceIndicator: boolean;
+  score: number;
+  theta: number;
+  se: number;
+  converged: boolean;
+  confidence_interval: [number, number];
+  questions_asked: number;
+  response_detail?: Array<{
+    question: string; type: QuestionType; score: number; difficulty: number;
+    bloomLevel: string; correct: boolean; conceptId: string | null;
+  }>;
+  concepts: Array<{ id: string; label: string; asked: number; correct: number; mastered: boolean }>;
+  profile: {
+    title: string; source: string; bloomLevelsReached: string[];
+    bloomCoverage: Record<string, number>; aberrant: boolean; questionTypes: QuestionType[];
+  };
+  knowledgeId: string;
+  contentId: number;
+  subject: string;
+  timestamp: string;
+  disclaimers: { irtCalibration: string; bloomMapping: string; thresholdSemantics: string };
+}
+```
+
+---
+
+## Errors
+
+| Code | HTTP | Meaning |
+|---|---|---|
+| `CONTENT_NOT_FOUND` | 404 | Unknown knowledge id |
+| `INDEXING_IN_PROGRESS` | 202 | Content still indexing (`Retry-After: 5`) |
+| `INDEXING_FAILED` | 422 | Indexing failed (see `error`) |
+| `INVALID_CONFIG` | 400 | Invalid input or configuration (also 413/415 for upload limits) |
+| `SESSION_EXPIRED` | 404 / 410 | Session unknown or expired |
+| `SESSION_NOT_ACTIVE` | 409 | Session already complete / not complete yet |
+| `LLM_ERROR` | 503 | LLM call failed (retry) |
+| `GRAPH_DB_ERROR` | 503 | FalkorDB unavailable |
+| `CAPACITY_EXCEEDED` | 429 | Rate limit |
+| `UNAUTHORIZED` | 401 | Missing/invalid bearer key |
+| `FORBIDDEN` | 403 | Admin API disabled |
+| `NOT_FOUND` | 404 | Unknown `/api` route |
+| `INTERNAL` | 500 | Unexpected error (details logged server-side) |
+
+SDK methods throw `PoCWError` with the same `code`.

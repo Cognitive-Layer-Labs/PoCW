@@ -2,7 +2,7 @@
  * Redis-backed session store.
  *
  * Persists verify sessions so they survive engine restarts.
- * TTL = 30 min (matches SESSION_TTL_MS in app.ts).
+ * TTL = 30 min, refreshed on every save (each answer).
  */
 
 import Redis from "ioredis";
